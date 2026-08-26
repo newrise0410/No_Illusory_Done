@@ -432,6 +432,12 @@ def verify_freeze(ctx: Ctx, gates: list[Gate] | None = None, quiet=False) -> boo
         problems.append("not a git repository (freeze cannot be witnessed)")
     else:
         relf = ctx.rel(ctx.freeze)
+        if git(ctx, "rev-parse", "--is-shallow-repository").stdout.strip() == "true":
+            problems.append("shallow repository: history is truncated, freeze cannot be witnessed (git fetch --unshallow)")
+        gitdir = Path(git(ctx, "rev-parse", "--git-common-dir").stdout.strip())
+        gitdir = gitdir if gitdir.is_absolute() else ctx.root / gitdir
+        if (gitdir / "info" / "grafts").exists() or (gitdir / "shallow").exists():
+            problems.append("grafted/shallow history present (.git/info/grafts or .git/shallow): freeze cannot be witnessed")
         head = git(ctx, "show", f"HEAD:{relf}")
         if head.returncode != 0:
             problems.append("FREEZE.sha256 not committed at HEAD")
