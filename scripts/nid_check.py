@@ -691,7 +691,7 @@ def set_ref_blob(ctx: Ctx, name: str, content: str) -> None:
     old = git(ctx, "rev-parse", "--verify", "-q", f"refs/nid/{name}").stdout.strip()
     h = subprocess.run(["git", "--no-replace-objects", "-C", str(ctx.root), "hash-object", "-w", "--stdin"], input=content,
                        capture_output=True, text=True, env={**GIT_ENV, "PATH": safe_path(ctx.root)}).stdout.strip()
-    args = ["update-ref", f"refs/nid/{name}", h] + ([old] if old else [])
+    args = ["update-ref", f"refs/nid/{name}", h, old or "0" * 40]  # null old value = must not exist yet
     if git(ctx, *args).returncode != 0:
         die(f"refs/nid/{name} changed concurrently (another --run in a linked worktree?) — rerun")
 

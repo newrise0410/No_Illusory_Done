@@ -109,4 +109,5 @@ Environment note: CHECKs run with PATH stripped of relative and repo-internal en
 - A CHECK that deliberately escapes its process group (`setsid` + ignore SIGHUP) outlives TIMEOUT. The escape is in a repo-owned, frozen script — visible to review, not preventable by the checker.
 - A product that indirects (reads a config it wrote to pick a module that returns the expected value) satisfies the oracle *observably*. The oracle asked for a value and got it; only mutation (python) or a human can tell a real implementation from a decoy.
 - A stateful oracle (passes on its Nth invocation) is a sentinel variant; `--red` sees one invocation. Same answer: mutation or a human.
+- A frozen test that delegates its assertion to a product helper (`assert util.check()`) lets the implementer write `check = lambda: True`. The test-writer must assert on observable product behaviour, never on a product-side verdict. The checker cannot tell the two apart.
 - Auth, payments, production merges: human review and host CI remain the bound.
