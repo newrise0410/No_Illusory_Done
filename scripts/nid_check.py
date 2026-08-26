@@ -292,12 +292,13 @@ def parse_ledger(ctx: Ctx) -> list[Gate]:
         if re.search(r"[*?\[\]~]", chk): die(f"{g.id}: globs/tilde in CHECK are not allowed (name files explicitly)")
         import shlex
         try:
-            words = shlex.split(chk.replace("&&", " ").replace("||", " ").replace("|", " ").replace(";", " "))
+            lex = shlex.shlex(chk, posix=True, punctuation_chars=True); lex.whitespace_split = True
+            words = [w for w in lex if w not in ("&&", "||", "|", ";", "(", ")", "<", ">", "&")]
         except ValueError as e:
             die(f"{g.id}: CHECK is not parseable as shell words ({e})")
         toks = set(PATHISH.findall(chk)) | set(words)
         for tok in toks:
-            if tok.startswith("-"): continue
+            if not tok or tok == "--": continue
             p = cwd / tok
             if p.is_file() and not str(p.resolve()).startswith(str(ctx.nid)):
                 relp = ctx.rel(p)
