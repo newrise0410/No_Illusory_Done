@@ -457,6 +457,24 @@ def write_state(ctx: Ctx, gates, results, it, stall, old):
     ctx.state.write_text(f"iteration: {it}\nstall: {stall}\n\n" + "\n".join(rows) + "\n")
 
 
+def ref_counter(ctx: Ctx, name: str) -> int:
+    """Counter stored as a git ref (refs/nid/<name>); harder to reset by accident than a .md file."""
+    r = git(ctx, "rev-parse", "--verify", "-q", f"refs/nid/{name}")
+    if r.returncode != 0:
+        return 0
+    blob = git(ctx, "cat-file", "-p", r.stdout.strip()).stdout.strip()
+    try:
+        return int(blob)
+    except ValueError:
+        die(f"refs/nid/{name} is malformed")
+
+
+def set_ref_counter(ctx: Ctx, name: str, value: int) -> None:
+    h = subprocess.run(["git", "-C", str(ctx.root), "hash-object", "-w", "--stdin"], input=str(value),
+                       capture_output=True, text=True).stdout.strip()
+    git(ctx, "update-ref", f"refs/nid/{name}", h)
+
+
 def stage_a(ctx: Ctx, gates: list[Gate], record=True) -> tuple[bool, dict, list[str]]:
     """Freeze -> run -> freeze again. Returns (pass, results, unmet)."""
     if not verify_freeze(ctx, gates, quiet=True):
@@ -477,6 +495,7 @@ def cmd_run(ctx: Ctx, hook=False) -> None:
     gates = parse_ledger(ctx)
     _, _, _, caps = parse_plan(ctx)
     old, it, stall = read_state(ctx)
+    it, stall = max(it, ref_counter(ctx, "iteration")), max(stall, ref_counter(ctx, "stall"))
     ok, results, unmet = stage_a(ctx, gates)
     for gid, r in results.items():
         print(f"{gid}: {'PASS' if r['pass'] else 'FAIL'} exit={r['exit']} expect={r['expect_match']} "
@@ -486,6 +505,7 @@ def cmd_run(ctx: Ctx, hook=False) -> None:
     stall = 0 if ok else (stall + 1 if prev_e == new_e else 0)
     it += 1
     write_state(ctx, gates, results, it, stall, old)
+    set_ref_counter(ctx, "iteration", it); set_ref_counter(ctx, "stall", stall)
     judge = [g.id for g in gates if g.kind == "llm-judge"]
     if not ok:
         print(f"UNMET: {','.join(unmet)}")
