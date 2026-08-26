@@ -269,6 +269,7 @@ Gate fields: `CHECK` (run under `bash -o errexit -o pipefail -o nounset`), `EXPE
 - **A requirement omitted from R.** Traceability is by id; nothing checks that R1..Rn is the whole request.
 - **A gate that fails at time zero for the wrong reason** (`test -f sentinel && …`). `--red` cannot distinguish "no implementation" from "no sentinel". For changed python, `--mutate` flags the gate as vacuous; for other languages it is `inconclusive` and a human must read the ledger.
 - **`COVERS` semantics.** One gate claiming three Rs while testing one passes the id check; `max_gates_per_r` bounds dilution, mutation catches it for python, nothing else does.
+- **Caps are advisory against an adversary.** Counters live in `STATE.md` and git refs (`refs/nid/*`, the larger wins); `git update-ref -d` resets them. They stop accidental loops, not deliberate ones.
 - **`--supersede` reasons are free text.** The cap and the permanent log make re-freezes visible; they do not judge them.
 - **A grader that reads the right file and reasons wrongly.** Pointers + SUBJECT prove access to the relevant artifact, not judgment.
 - **Auth, payments, production merges.** Human review and host CI remain the right bound there.

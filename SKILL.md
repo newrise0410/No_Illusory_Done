@@ -97,6 +97,7 @@ Checker enforces: CHECK runs under `bash -o errexit -o pipefail -o nounset` (a `
 - A test-writer who omits a requirement from R, or writes a gate that a mutant of the *wrong* file cannot reach. `--mutate` (python only in v1) catches vacuous oracles for changed python; other languages are `inconclusive`.
 - A CHECK that depends on an undeclared sentinel the implementer can create (`test -f x && …`). `--red` proves the oracle failed at time zero, not that it fails for the right reason. For changed python, `--mutate` flags such a gate as vacuous (mutants survive); for other languages it is `inconclusive`, and a human must read the ledger.
 - `COVERS` is by id. One gate claiming `R1, R2, R3` while testing R1 passes `--status`; only mutation (python) or a human catches it. A FALSIFIER that is well-formed prose but meaningless passes too — Stage B must refuse to grade it.
+- Iteration/stall counters are kept in `STATE.md` and in git refs (`refs/nid/iteration`, `refs/nid/stall`; the larger wins). Deleting the refs resets the caps. Caps bound accidental looping, not adversarial looping.
 - A `--supersede` reason is free text. The cap and the permanent log make abuse visible; they do not judge the reason.
 - Stage B reasoning wrongly about a file it did read. Pointers prove access, not judgment. SUBJECT + FALSIFIER shrink the surface.
 - Auth, payments, production merges: human review and host CI remain the bound.
