@@ -60,7 +60,8 @@ Before any implementation, the test-writer runs every gate. **Each must fail.** 
 - refuses if any hashed file differs — checked **before and after** running the gates, so a CHECK that rewrites a frozen file mid-run is caught;
 - refuses if `FREEZE.sha256` differs from `git HEAD`, or if more commits touched it than the `SUPERSEDE` lines it declares — a re-freeze must be declared with `--red --supersede "<reason>"` and stays in the file forever;
 - refuses outside a git repository (no witness → no verdict);
-- refuses if a CHECK names an existing file that is neither in `FILES` (frozen) nor `MUTABLE` (declared changeable).
+- refuses if a CHECK names an existing file that is neither in `FILES` (frozen) nor `MUTABLE` (declared changeable); `FILES` must be non-empty and inside the repo, and a `MUTABLE` file may never be the thing CHECK executes;
+- refuses more than `max_supersedes` declared re-freezes (default 1).
 
 What git cannot witness — history rewrite, force-push — is outside the checker.
 
@@ -73,10 +74,10 @@ What git cannot witness — history rewrite, force-push — is outside the check
 Some outcomes genuinely cannot be a command (game rules hold, UI state is sensible, no credentials in the diff). These go in `PLAN.md` as `H1..Hn`, and each must name its **falsifier** — what observation would make it false:
 
 ```text
-H1: no credentials in the diff | FALSIFIER: a string shaped like an API token appears in the diff | SUBJECT: src/, $ git diff
+H1: no credentials in the diff | FALSIFIER: a string shaped like an API token appears in the diff | SUBJECT: src/auth.ts, $ git diff main --stat
 ```
 
-If the falsifier is a command (contains `$`, `|`, `&&`, `./`, or starts with any executable on `PATH`), the checker refuses: that is a runnable gate, put it in the ledger. `SUBJECT` names the repo paths and `$ command` prefixes a CI pointer for this H may cite — a pointer to `/dev/null`, to `.no-illusory-done/`, or to an unrelated file is rejected. Vague phrases are refused.
+If the falsifier is a command (contains `$`, `|`, `&&`, `./`, or starts with any executable on `PATH`), the checker refuses: that is a runnable gate, put it in the ledger. `SUBJECT` names the **exact** regular files and **exact** `$ commands` a CI pointer for this H may cite — directories, prefixes, symlinks out of the repo, `/dev/null`, `.no-illusory-done/` are all rejected. Vague phrases are refused.
 
 ### 3.6 Two-stage CI, with verifiable pointers
 
@@ -90,7 +91,7 @@ H2: pass $ git diff main --stat sha=b81d0c4e55aa     # sha256 of that command's 
 H3: fail tier badge missing on /pricing
 ```
 
-`--ci` first re-runs Stage A itself (it never trusts a recorded result), then rehashes each file range or reruns each command. The pointer must lie within the H line's `SUBJECT`; the command must exit 0 and produce output. A mismatch downgrades the pass to fail. This proves the grader cited the real artifact in its current state — not that it reasoned correctly about it.
+`--ci` first re-runs Stage A and `--mutate` itself (it never trusts a recorded result), then rehashes each file range or reruns each command. The pointer must be exactly one of the H line's `SUBJECT` entries; the command must exit 0 and produce output; a gate that passed only on retry is a process failure. Any of these downgrades the verdict to reject. This proves the grader cited the real artifact in its current state — not that it reasoned correctly about it.
 
 ### 3.7 Machine-generated verdict and stop hook
 
@@ -102,7 +103,7 @@ H3: fail tier badge missing on /pricing
 
 ### 3.9 Mutation (`--mutate`)
 
-`--red` proves an oracle fails without the code; `--mutate` proves it fails with *slightly wrong* code. For every python source file changed since the freeze, the checker generates AST mutants (comparison/arithmetic/boolean operator swaps, constant shifts, `if` negation, `return → return None`), applies each in a throwaway git worktree, and re-runs all gates. A mutant no gate kills is printed as `VACUOUS ORACLE` and the command fails. v1 is python-only; other languages return `inconclusive`.
+`--red` proves an oracle fails without the code; `--mutate` proves it fails with *slightly wrong* code. For every python source file changed since the freeze, the checker generates AST mutants (comparison/arithmetic/boolean operator swaps, constant shifts, `if` negation, `return → return None`), applies each in a throwaway git worktree, and re-runs all gates. A mutant no gate kills is printed as `VACUOUS ORACLE` and the command fails. Zero mutants (no changed python, or python with nothing to mutate) is `inconclusive` — exit 1, shown in `--report`, not silently a pass. v1 is python-only.
 
 ## 4. Roles
 
@@ -156,6 +157,8 @@ R2: annual toggle shows 20% discount to two decimals
 R3: no new secrets in the diff
 
 H1: tier order matches marketing spec (Basic, Pro, Team) | FALSIFIER: any other order or a fourth card is visible on /pricing | SUBJECT: src/pages/pricing.tsx
+max_supersedes: 1
+max_gates_per_r: 4
 
 SETUP: npm ci
 max_iterations: 8
@@ -240,8 +243,8 @@ python3 scripts/nid_check.py --report                       # paste verbatim; "d
 | `--red LEDGER` | run all gates, require RED, write `FREEZE.sha256` (`--supersede "<reason>"` to re-freeze, recorded) | all required gates failed |
 | `--verify-freeze` | hashes vs working tree; FREEZE vs HEAD; commit count vs declared supersedes; RED records present | match |
 | `--run LEDGER` | freeze → run gates → freeze again; update `STATE.md`; enforce caps | ALL MET (exit 1 unmet, 3 handoff) |
-| `--mutate LEDGER` | AST mutants of changed python, each must be killed by a gate | no survivors |
-| `--ci CI.md` | re-run Stage A; validate pointers against SUBJECT; cross-check fields | `CI: merge-ok` consistent |
+| `--mutate LEDGER` | AST mutants of changed python, each must be killed by a gate | no survivors (0 mutants = inconclusive, exit 1) |
+| `--ci CI.md` | re-run Stage A + mutation; validate pointers against exact SUBJECT; flaky = process fail | `CI: merge-ok` consistent |
 | `--report` | re-run Stage A + CI validation; print verdict | `VERDICT: merge-ok` |
 | `--hook` | Stop-hook entry (no ledger → exit 0; else `--run`) | ALL MET |
 
@@ -264,7 +267,9 @@ Gate fields: `CHECK` (run under `bash -o errexit -o pipefail -o nounset`), `EXPE
 - **An agent that never loads the skill**, or deletes `.no-illusory-done/`. Git history shows it; nothing prevents it.
 - **History rewrite / force-push.** Git HEAD is the freeze witness; an actor who rewrites history defeats it. Branch protection or a human is the bound.
 - **A requirement omitted from R.** Traceability is by id; nothing checks that R1..Rn is the whole request.
-- **A gate that fails at time zero for the wrong reason** (`test -f sentinel && …`). `--red` cannot distinguish "no implementation" from "no sentinel". `--mutate` narrows this for python; it does not close it, and v1 covers python only.
+- **A gate that fails at time zero for the wrong reason** (`test -f sentinel && …`). `--red` cannot distinguish "no implementation" from "no sentinel". For changed python, `--mutate` flags the gate as vacuous; for other languages it is `inconclusive` and a human must read the ledger.
+- **`COVERS` semantics.** One gate claiming three Rs while testing one passes the id check; `max_gates_per_r` bounds dilution, mutation catches it for python, nothing else does.
+- **`--supersede` reasons are free text.** The cap and the permanent log make re-freezes visible; they do not judge them.
 - **A grader that reads the right file and reasons wrongly.** Pointers + SUBJECT prove access to the relevant artifact, not judgment.
 - **Auth, payments, production merges.** Human review and host CI remain the right bound there.
 

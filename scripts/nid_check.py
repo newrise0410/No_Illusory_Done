@@ -45,12 +45,12 @@ FIELD_RE = re.compile(r"^\s*([A-Z]+):\s*(.*?)\s*$")
 FIELDS = {"CHECK", "EXPECT", "CWD", "TIMEOUT", "RETRIES", "FILES", "MUTABLE", "KIND", "RED", "EVIDENCE", "COVERS"}
 R_RE = re.compile(r"^(R\d+):\s*(.+?)\s*$")
 H_RE = re.compile(r"^(H\d+):\s*(.+?)\s*$")
-CAP_RE = re.compile(r"^(max_iterations|stall_iters|max_ci_attempts):\s*(\d+)\s*$")
+CAP_RE = re.compile(r"^(max_iterations|stall_iters|max_ci_attempts|max_supersedes|max_gates_per_r):\s*(\d+)\s*$")
 VAGUE = re.compile(r"looks good|covers the feature|works correctly|as expected|properly|correctly", re.I)
 # Tokens in a CHECK that look like paths.
 PATHISH = re.compile(r"(?<![\w-])((?:\.{0,2}/)?[\w.-]+(?:/[\w.-]+)*\.[A-Za-z0-9]{1,8}|(?:\./|\.\./)[\w./-]+)")
 BAD_CHECK = [
-    (re.compile(r"(^|[;&|(]\s*)(echo|printf|true|false|command|eval|exec|source)\b"), "shell no-op/indirection"),
+    (re.compile(r"(^|[;&|(]\s*)(echo|printf|true|false|command|eval|exec|source|env|xargs|nohup|nice|time|builtin)\b"), "shell no-op/indirection"),
     (re.compile(r"(^|[;&|(]\s*):(\s|$)"), ":"),
     (re.compile(r"\b(sh|bash|zsh|dash)\s+-c\b"), "nested shell"),
     (re.compile(r"\bexit\s+0\b"), "exit 0"),
@@ -133,7 +133,7 @@ def parse_plan(ctx: Ctx):
     if not ctx.plan.exists():
         die("PLAN.md missing")
     reqs, highs, setup = {}, {}, []
-    caps = {"max_iterations": 8, "stall_iters": 3, "max_ci_attempts": 3}
+    caps = {"max_iterations": 8, "stall_iters": 3, "max_ci_attempts": 3, "max_supersedes": 1, "max_gates_per_r": 4}
     for ln, raw in enumerate(ctx.plan.read_text(encoding="utf-8").replace("\r", "").splitlines(), 1):
         line = raw.strip().lstrip("-* ").strip()
         m = CAP_RE.match(line)
@@ -166,10 +166,12 @@ def parse_plan(ctx: Ctx):
             subjects = [s.strip() for s in kv["SUBJECT"].split(",") if s.strip()]
             for s in subjects:
                 if s.startswith("$ "):
+                    if len(s) < 6 or any(rx.search(s[2:]) for rx, _ in BAD_CHECK):
+                        die(f"PLAN.md {hid}: SUBJECT command too short or forbidden: {s}")
                     continue
                 sp = (ctx.root / s)
-                if not sp.exists() or ctx.rel(sp).startswith(".."):
-                    die(f"PLAN.md {hid}: SUBJECT path not in repo: {s}")
+                if not inside_repo(ctx, sp) or not sp.is_file():
+                    die(f"PLAN.md {hid}: SUBJECT must be an existing regular file inside the repo (not a directory, not a symlink out): {s}")
                 if str(sp.resolve()).startswith(str(ctx.nid)):
                     die(f"PLAN.md {hid}: SUBJECT may not be inside .no-illusory-done")
             kv["SUBJECTS"] = subjects
@@ -177,6 +179,23 @@ def parse_plan(ctx: Ctx):
     if not reqs:
         die("PLAN.md has no R1.. requirement clauses")
     return reqs, highs, setup, caps
+
+
+def inside_repo(ctx: Ctx, p: Path) -> bool:
+    """True iff p (and every symlink it goes through) resolves inside the repo root."""
+    try:
+        r = p.resolve(strict=True)
+    except (OSError, RuntimeError):
+        return False
+    if not str(r).startswith(str(ctx.root) + os.sep):
+        return False
+    # walk components to reject symlinks that point outside
+    cur = ctx.root
+    for part in os.path.relpath(p, ctx.root).split(os.sep):
+        cur = cur / part
+        if cur.is_symlink() and not str(cur.resolve()).startswith(str(ctx.root) + os.sep):
+            return False
+    return True
 
 
 def falsifier_is_command(f: str) -> bool:
@@ -232,8 +251,16 @@ def parse_ledger(ctx: Ctx) -> list[Gate]:
                 relp = ctx.rel(p)
                 if relp not in declared and tok not in declared:
                     die(f"{g.id}: CHECK references existing file {relp} not declared in FILES or MUTABLE")
-        for f in g.files:
-            if not (ctx.root / f).is_file(): die(f"{g.id}: FILES entry missing: {f}")
+        if not g.files: die(f"{g.id}: FILES is empty — a runnable gate must depend on at least one frozen oracle file")
+        for f in g.files + g.mutable:
+            fp = ctx.root / f
+            if not fp.is_file() or not inside_repo(ctx, fp): die(f"{g.id}: FILES/MUTABLE entry missing, not a regular file, or symlinks outside the repo: {f}")
+        for m_ in g.mutable:
+            if re.search(r"(^|[;&|(]\s*)(\S*/)?" + re.escape(Path(m_).name) + r"(\s|$)", chk) or \
+               re.search(r"\b(python[3]?|node|bash|sh|ruby|perl|deno|bun)\s+(-\S+\s+)*(\S*/)?" + re.escape(Path(m_).name) + r"(\s|$)", chk):
+                die(f"{g.id}: MUTABLE file {m_} is executed by CHECK — an oracle the implementer can rewrite is not an oracle")
+    checks = [g.f.get("CHECK", "").strip() for g in gates if g.kind == "cmd"]
+    if len(checks) != len(set(checks)): die("two gates have identical CHECK commands (duplicate observation)")
     if all(g.kind == "llm-judge" for g in gates):
         die("all gates are llm-judge; at least one runnable gate required")
     if not any(g.kind == "cmd" and g.f.get("RED", "required") == "required" for g in gates):
@@ -246,6 +273,10 @@ def parse_ledger(ctx: Ctx) -> list[Gate]:
         covered.update(g.covers)
     missing = sorted(set(reqs) - covered, key=lambda x: int(x[1:]))
     if missing: die(f"requirements with no gate: {','.join(missing)}")
+    _, _, _, caps = parse_plan(ctx)
+    for r in reqs:
+        n = sum(1 for g in gates if r in g.covers)
+        if n > caps["max_gates_per_r"]: die(f"{r} is covered by {n} gates (max_gates_per_r={caps['max_gates_per_r']}): traceability dilution")
     return gates
 
 
@@ -349,8 +380,12 @@ def verify_freeze(ctx: Ctx, gates: list[Gate] | None = None, quiet=False) -> boo
             n = int(git(ctx, "rev-list", "--count", "HEAD", "--", relf).stdout.strip() or 0)
             if n != 1 + len(sup):
                 problems.append(f"FREEZE.sha256 touched by {n} commits but {len(sup)} SUPERSEDE declared (undeclared re-freeze)")
-            elif sup and not quiet:
-                for x in sup: print(f"FREEZE SUPERSEDED: {x}")
+            elif sup:
+                _, _, _, caps = parse_plan(ctx)
+                if len(sup) > caps["max_supersedes"]:
+                    problems.append(f"{len(sup)} re-freezes exceed max_supersedes={caps['max_supersedes']}: human review required")
+                if not quiet:
+                    for x in sup: print(f"FREEZE SUPERSEDED: {x}")
     if not quiet:
         for pr in problems: print(f"FREEZE MISMATCH: {pr}")
         print("FREEZE: match" if not problems else "FREEZE: mismatch")
@@ -367,15 +402,15 @@ def cmd_red(ctx: Ctx, supersede: str | None = None) -> None:
         prev = git(ctx, "log", "-1", "--format=%h", "--", ctx.rel(ctx.freeze)).stdout.strip() or "uncommitted"
         sup.append(f"{len(sup) + 1} prev={prev} {supersede.strip()}")
     bad, reds = [], []
-    head_tracked = set(git(ctx, "ls-files").stdout.split())
+    head_tracked = set(git(ctx, "ls-tree", "-r", "--name-only", "HEAD").stdout.split())
     for g in gates:
         if g.kind != "cmd": continue
         r = run_gate(ctx, g, record=False)
         if r["pass"]:
             if g.f.get("RED", "required") == "required":
                 bad.append(g.id)
-            elif not g.files or not all(f in head_tracked for f in g.files):
-                die(f"{g.id}: RED: pass-ok requires FILES that are already tracked in git (a regression gate)")
+            elif not all(f in head_tracked for f in g.files):
+                die(f"{g.id}: RED: pass-ok requires FILES already committed at HEAD before this freeze (a regression gate)")
         elif g.f.get("RED") == "pass-ok":
             die(f"{g.id}: RED: pass-ok but the gate fails now; it is not a regression gate")
         reds.append(f"RED {g.id} {r['sha256']} {r['exit']}")
@@ -400,10 +435,12 @@ def read_state(ctx: Ctx):
             if m: st[m.group(1)] = {"E": m.group(2), "B": m.group(3), "note": m.group(4).strip()}
             elif line.startswith("iteration:"):
                 try: it = int(line.split(":")[1])
-                except ValueError: it = 0
+                except ValueError: die("STATE.md malformed (iteration); delete it to reset")
             elif line.startswith("stall:"):
                 try: stall = int(line.split(":")[1])
-                except ValueError: stall = 0
+                except ValueError: die("STATE.md malformed (stall); delete it to reset")
+            elif line.startswith("|") and not STATE_ROW.match(line) and not re.match(r"^\|\s*(id|-+)\s*\|", line):
+                die(f"STATE.md malformed row: {line!r}; delete it to reset")
     return st, it, stall
 
 
@@ -430,6 +467,10 @@ def stage_a(ctx: Ctx, gates: list[Gate], record=True) -> tuple[bool, dict, list[
         die("a CHECK mutated a frozen file during the run -> reject")
     unmet = [gid for gid, r in results.items() if not r["pass"]]
     return not unmet, results, unmet
+
+
+def flaky_ids(results: dict) -> list[str]:
+    return [gid for gid, r in results.items() if r.get("flaky")]
 
 
 def cmd_run(ctx: Ctx, hook=False) -> None:
@@ -490,14 +531,11 @@ def verify_pointer(ctx: Ctx, hid: str, ptr: str, subjects: list[str]) -> str | N
             return f"{hid}: pointer outside repo: {pth}"
         if str(p.resolve()).startswith(str(ctx.nid)): return f"{hid}: pointer inside .no-illusory-done (not an artifact)"
         if not p.is_file(): return f"{hid}: pointer file missing {pth}"
-        exact = any(not s.startswith("$ ") and rp == s.rstrip("/") for s in subjects)
-        under = any(not s.startswith("$ ") and rp.startswith(s.rstrip("/") + "/") for s in subjects)
-        if not (exact or under):
-            return f"{hid}: pointer {rp} not under SUBJECT {subjects}"
-        if under and not exact:
-            fcommit = git(ctx, "log", "-1", "--format=%H", "--", ctx.rel(ctx.freeze)).stdout.strip()
-            if rp not in changed_files(ctx, fcommit):
-                return f"{hid}: pointer {rp} is under SUBJECT but unchanged since the freeze (cites nothing about this change); name it exactly in SUBJECT if intended"
+        if "*" in subjects:
+            pass  # llm-judge gates: any regular file inside the repo
+        elif not any(not s.startswith("$ ") and rp == s for s in subjects):
+            return f"{hid}: pointer {rp} is not one of the SUBJECT files {[x for x in subjects if not x.startswith('$ ')]}"
+        if not inside_repo(ctx, p): return f"{hid}: pointer resolves outside the repo"
         if l1:
             lines = p.read_text(encoding="utf-8", errors="replace").splitlines()
             a, b = int(l1), int(l2 or l1)
@@ -509,8 +547,8 @@ def verify_pointer(ctx: Ctx, hid: str, ptr: str, subjects: list[str]) -> str | N
     m = CMD_PTR.match(ptr)
     if m:
         cmd, h = m.group(1), m.group(2)
-        if not any(s.startswith("$ ") and cmd.startswith(s[2:].strip()) for s in subjects):
-            return f"{hid}: pointer command not under a '$ ' SUBJECT prefix"
+        if "*" not in subjects and not any(s.startswith("$ ") and cmd.strip() == s[2:].strip() for s in subjects):
+            return f"{hid}: pointer command must equal a '$ ' SUBJECT command exactly"
         for rx, name in BAD_CHECK:
             if rx.search(cmd): return f"{hid}: pointer command forbidden ({name})"
         try:
@@ -538,7 +576,7 @@ def check_ci_pointers(ctx: Ctx, highs: dict, judge_ids: list[str]):
             if hid not in highs and hid not in judge_ids:
                 problems.append(f"{hid}: verdict for unknown criterion"); continue
             if hid in judge_ids:
-                subjects = ["$ ", ""]  # llm-judge gates: any in-repo file / any command
+                subjects = ["*"]  # llm-judge gates: any regular in-repo file / any non-forbidden command
             why = verify_pointer(ctx, hid, ptr, subjects)
             if why: problems.append(why); verdicts[hid] = "fail"
     for hid in list(highs) + judge_ids:
@@ -552,12 +590,15 @@ def ci_verdict(ctx: Ctx) -> tuple[str, list[str]]:
     _, highs, _, _ = parse_plan(ctx)
     v = parse_ci(ctx)
     fz = verify_freeze(ctx, gates, quiet=True)
-    a_ok, _, unmet = stage_a(ctx, gates, record=False)
+    a_ok, results, unmet = stage_a(ctx, gates, record=False)
     judge = [g.id for g in gates if g.kind == "llm-judge"]
     verdicts, problems = check_ci_pointers(ctx, highs, judge)
+    if flaky_ids(results): problems.append(f"flaky gates passed only on retry: {','.join(flaky_ids(results))} (process fail)")
+    mut = mutation_verdict(ctx, gates)
+    if mut["status"] == "fail": problems.append(f"VACUOUS ORACLE: {len(mut['survivors'])} mutants survived: " + "; ".join(mut["survivors"][:5]))
     failed = [k for k in list(highs) + judge if verdicts.get(k) != "pass"]
     if v["CI"] != "merge-ok":
-        return v["CI"], []
+        return v["CI"], [f"mutation: {mut['status']}"] if mut["status"] != "pass" else []
     if not fz: problems.append("freeze mismatch")
     if not a_ok: problems.append(f"Stage A fails on THIS run: {','.join(unmet)}")
     if v["STAGE_A"] != "pass": problems.append("STAGE_A field is not pass")
@@ -645,17 +686,14 @@ def count_mutants(src: str) -> int:
     m = Mutator(10**9); m.visit(ast.parse(src)); return m.count
 
 
-def cmd_mutate(ctx: Ctx, max_per_file=20) -> None:
-    gates = parse_ledger(ctx)
-    if not verify_freeze(ctx, gates, quiet=True):
-        verify_freeze(ctx, gates); die("refusing --mutate: freeze mismatch")
-    a_ok, _, unmet = stage_a(ctx, gates, record=False)
-    if not a_ok: die(f"baseline not ALL MET ({','.join(unmet)}); mutation is meaningless")
+def mutation_verdict(ctx: Ctx, gates: list[Gate], max_per_file=20, verbose=False) -> dict:
+    """Returns {"status": pass|fail|inconclusive, "survivors": [...], "total": n, "note": str}."""
     frozen, _, _ = read_freeze(ctx)
     fcommit = git(ctx, "log", "-1", "--format=%H", "--", ctx.rel(ctx.freeze)).stdout.strip()
     changed = [f for f in changed_files(ctx, fcommit) if f.endswith(".py") and f not in frozen and not f.startswith("scripts/nid_check") and (ctx.root / f).is_file()]
     changed = sorted(set(changed))
-    if not changed: die("no changed .py source since freeze -> inconclusive (mutation v1 supports python only)")
+    if not changed:
+        return {"status": "inconclusive", "survivors": [], "total": 0, "note": "no changed .py source since freeze (mutation v1: python only)"}
     survivors, total = [], 0
     for f in changed:
         src = (ctx.root / f).read_text(encoding="utf-8")
@@ -665,6 +703,7 @@ def cmd_mutate(ctx: Ctx, max_per_file=20) -> None:
         for i in range(1, n + 1):
             total += 1
             m = Mutator(i); tree = m.visit(ast.parse(src)); ast.fix_missing_locations(tree)
+            git(ctx, "worktree", "prune")
             with tempfile.TemporaryDirectory() as td:
                 wt = Path(td) / "wt"
                 if git(ctx, "worktree", "add", "--detach", str(wt), "HEAD").returncode != 0: die("git worktree add failed")
@@ -679,15 +718,28 @@ def cmd_mutate(ctx: Ctx, max_per_file=20) -> None:
                 finally:
                     os.chdir(ctx.root)
                     git(ctx, "worktree", "remove", "--force", str(wt))
-            print(f"{f} #{i} {m.desc}: {'killed' if killed else 'SURVIVED'}")
+            if verbose: print(f"{f} #{i} {m.desc}: {'killed' if killed else 'SURVIVED'}")
             if not killed: survivors.append(f"{f}#{i} {m.desc}")
-    print(f"MUTANTS: {total} killed: {total - len(survivors)} survived: {len(survivors)}")
-    if survivors:
+    if total == 0:
+        return {"status": "inconclusive", "survivors": [], "total": 0, "note": "changed python has no mutable nodes"}
+    return {"status": "fail" if survivors else "pass", "survivors": survivors, "total": total, "note": ""}
+
+
+def cmd_mutate(ctx: Ctx) -> None:
+    gates = parse_ledger(ctx)
+    if not verify_freeze(ctx, gates, quiet=True):
+        verify_freeze(ctx, gates); die("refusing --mutate: freeze mismatch")
+    a_ok, _, unmet = stage_a(ctx, gates, record=False)
+    if not a_ok: die(f"baseline not ALL MET ({','.join(unmet)}); mutation is meaningless")
+    mv = mutation_verdict(ctx, gates, verbose=True)
+    print(f"MUTANTS: {mv['total']} killed: {mv['total'] - len(mv['survivors'])} survived: {len(mv['survivors'])}")
+    if mv["status"] == "inconclusive":
+        print(f"MUTATION: inconclusive — {mv['note']}"); sys.exit(1)
+    if mv["survivors"]:
         print("VACUOUS ORACLE: gates did not detect these near-miss implementations:")
-        for s in survivors: print("  " + s)
+        for x in mv["survivors"]: print("  " + x)
         sys.exit(1)
-    print("MUTATION: pass")
-    sys.exit(0)
+    print("MUTATION: pass"); sys.exit(0)
 
 
 # --------------------------------------------------------------------------
@@ -701,7 +753,7 @@ def cmd_report(ctx: Ctx) -> None:
             ci, problems = ci_verdict(ctx)
         except SystemExit:
             ci = "reject(parse-fail)"
-    verdict = "merge-ok" if (ci == "merge-ok" and a_ok and fz) else \
+    verdict = "merge-ok" if (ci == "merge-ok" and a_ok and fz and not flaky_ids(results)) else \
               "reject" if ci.startswith("reject") else "inconclusive" if ci == "inconclusive" else "not-verified"
     _, it, _ = read_state(ctx)
     print(f"VERDICT: {verdict}")
@@ -709,6 +761,9 @@ def cmd_report(ctx: Ctx) -> None:
     print(f"CI: {ci}")
     print(f"UNMET: {','.join(unmet) if unmet else 'none'}")
     print(f"FREEZE: {'match' if fz else 'mismatch'}")
+    print(f"FLAKY: {','.join(flaky_ids(results)) or 'none'}")
+    mv = mutation_verdict(ctx, gates) if (fz and a_ok) else {"status": "not-run", "survivors": [], "note": ""}
+    print(f"MUTATION: {mv['status']}" + (f" ({len(mv['survivors'])} survived)" if mv['survivors'] else "") + (f" — {mv['note']}" if mv.get('note') else ""))
     print(f"ITER: {it}")
     print("EVIDENCE: " + ("; ".join(f"{k} → exit {r['exit']}, expect {r['expect_match']}, {r['sha256'][:12]}" for k, r in results.items()) or "none"))
     for p in problems: print(f"CI PROBLEM: {p}")

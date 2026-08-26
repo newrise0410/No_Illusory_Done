@@ -40,14 +40,14 @@ scripts/nid_check.py                                                        — 
 ```markdown
 R1: /pricing renders exactly three tier cards
 R2: annual toggle shows a 20.00% discount
-H1: tier order matches marketing spec | FALSIFIER: any order other than Basic, Pro, Team is visible | SUBJECT: src/pages/pricing.tsx, $ npx playwright
+H1: tier order matches marketing spec | FALSIFIER: any order other than Basic, Pro, Team is visible | SUBJECT: src/pages/pricing.tsx, $ npx playwright test tiers
 SETUP: npm ci
-max_iterations: 8
-stall_iters: 3
+max_iterations: 8        stall_iters: 3
+max_supersedes: 1        max_gates_per_r: 4
 ```
 
 - `R1..Rn` — atomic clauses of the **current** request. Every gate lists the Rs it observes (`COVERS:`); every R must be covered. Checked by id only — this catches omitted requirements, not lying gates.
-- `H1..Hn` — outcomes no command can observe. `FALSIFIER` names the observation that would make it false; if it *is* a command (contains `$ | && ./`, or starts with any executable on PATH) it is refused — put it in the ledger. `SUBJECT` lists the repo paths and/or `$ cmd` prefixes a CI pointer may cite for this H; anything else is rejected.
+- `H1..Hn` — outcomes no command can observe. `FALSIFIER` names the observation that would make it false; if it *is* a command (contains `$ | && ./`, or starts with any executable on PATH) it is refused — put it in the ledger. `SUBJECT` lists the **exact regular files** and/or **exact `$ commands`** a CI pointer may cite for this H — no directories, no prefixes, no symlinks out of the repo. Anything else is rejected.
 - Vague words (looks good, correctly, properly, as expected) are refused in R and H lines.
 
 ## 3. Gate contract
@@ -56,27 +56,27 @@ stall_iters: 3
 - [ ] G1: pricing page renders three tier cards          # a state, not an activity
   CHECK: npx vitest run tests/pricing.spec.ts && cat tests/nid/G1.marker
   EXPECT: NID G1                                          # literal or /regex/, last non-empty line
-  FILES: tests/pricing.spec.ts, tests/nid/G1.marker       # frozen
-  MUTABLE: fixtures/generated.json                        # existing files CHECK reads that may change
+  FILES: tests/pricing.spec.ts, tests/nid/G1.marker       # frozen; at least one required
+  MUTABLE: fixtures/generated.json                        # existing files CHECK reads that may change; never executed
   COVERS: R1
   CWD: .        TIMEOUT: 300        RETRIES: 0            # RETRIES 0..2; pass-on-retry flagged flaky
   KIND: cmd     RED: required                             # llm-judge → no CHECK; pass-ok → regression gate only
 ```
 
-Checker enforces: CHECK runs under `bash -o errexit -o pipefail -o nounset` (a `;`-masked failure fails); forbidden tokens `echo printf true false : command eval exec sh -c exit 0 passWithNoTests || true python -c touch cp mv rm tee sed -i >`; CHECK may not contain EXPECT; **every existing file a CHECK names must be in FILES or MUTABLE**; `RED: pass-ok` only for gates whose FILES were already tracked in git and that pass at `--red`; at least one `RED: required` gate.
+Checker enforces: CHECK runs under `bash -o errexit -o pipefail -o nounset` (a `;`-masked failure fails); forbidden: `echo printf true false : command eval exec source env xargs nohup nice time sh -c exit 0 passWithNoTests || true python -c touch cp mv rm tee sed -i >` and any `$`, backtick, heredoc or `VAR=` (use a repo-owned script); CHECK may not contain EXPECT; **every existing file a CHECK names must be in FILES or MUTABLE**, FILES non-empty, all inside the repo, no symlinks out; a MUTABLE file may not be what CHECK executes; no two gates with identical CHECK; at most `max_gates_per_r` gates per R; `RED: pass-ok` only for gates whose FILES were committed at HEAD before the freeze and that pass at `--red`; at least one `RED: required` gate.
 
 ## 4. Roles
 
 **Test-writer** — reads request + code as spec; writes tests, `PLAN.md`, `LEDGER.md`; `--status`; `--red`; commits. No production code.
 
-**Implementer** — one leaf at a time; `--run` after each; on fail, pastes the assertion text from `evidence/Gn.out` into the next turn. May edit only the `B` column of `STATE.md`. Cannot touch frozen files (wrong gate → `HANDOFF: ledger-defect`; a human or a fresh test-writer re-freezes with `--supersede`). `ALL MET` is the claim, not acceptance. Caps are enforced by the checker: `iteration ≥ max_iterations` or `stall ≥ stall_iters` while unmet → `HANDOFF REQUIRED` (exit 3).
+**Implementer** — one leaf at a time; `--run` after each; on fail, pastes the assertion text from `evidence/Gn.out` into the next turn. May edit only the `B` column of `STATE.md`. Cannot touch frozen files (wrong gate → `HANDOFF: ledger-defect`; a human or a fresh test-writer re-freezes with `--supersede "<reason>"`, at most `max_supersedes` times — beyond that the freeze is a mismatch until a human resets it). `ALL MET` is the claim, not acceptance. Caps are enforced by the checker: `iteration ≥ max_iterations` or `stall ≥ stall_iters` while unmet → `HANDOFF REQUIRED` (exit 3).
 
 **LLM CI** — new worktree, empty conversation, forbidden inputs: implementer chat, PR summary, checkboxes, `STATE.md`.
 - Stage A: `SETUP`, then `--run`. Fail → `CI: reject`, stop.
-- `--mutate` (python v1): AST mutants of every source file changed since the freeze; each must be killed by some gate. Survivors → `VACUOUS ORACLE`, `CI: reject`, handoff to test-writer.
+- `--mutate` (python v1): AST mutants of every source file changed since the freeze; each must be killed by some gate. Survivors → `VACUOUS ORACLE`; zero mutants or no python → `inconclusive` (exit 1, printed in `--report`, not a reject by itself). `--ci` runs this internally; survivors reject.
 - Stage B: grade only H lines and `llm-judge` gates, each against its FALSIFIER, citing a pointer within its SUBJECT:
   `H1: pass @ src/pages/pricing.tsx:22-40 sha=<≥12 hex of those lines>` or `H1: pass $ npx playwright test tiers sha=<≥12 hex of output>`. `--ci` rehashes / reruns; a pointer outside SUBJECT, outside the repo, with a wrong hash, no output, or non-zero exit downgrades the pass to fail.
-- Write `CI.md` (`CI / STAGE_A / STAGE_B / PROCESS / OUTCOME / UNMET / EVIDENCE:` + one verdict line per H/llm-judge id), then `--ci`. `--ci` re-runs Stage A itself; it never reads a prior run's record.
+- Write `CI.md` (`CI / STAGE_A / STAGE_B / PROCESS / OUTCOME / UNMET / EVIDENCE:` + one verdict line per H/llm-judge id), then `--ci`. `--ci` re-runs Stage A and mutation itself; it never reads a prior run's record. A gate that passed only on retry is a process failure → reject.
 
 ## 5. Stop hook
 
@@ -95,6 +95,8 @@ Checker enforces: CHECK runs under `bash -o errexit -o pipefail -o nounset` (a `
 
 - Deleting `.no-illusory-done/`, rewriting git history, or never loading the skill. Visible in history; not preventable here.
 - A test-writer who omits a requirement from R, or writes a gate that a mutant of the *wrong* file cannot reach. `--mutate` (python only in v1) catches vacuous oracles for changed python; other languages are `inconclusive`.
-- A CHECK that depends on an undeclared sentinel the implementer can create (`test -f x && …`). `--red` proves the oracle failed at time zero, not that it fails for the right reason. Mutation narrows this; it does not close it.
+- A CHECK that depends on an undeclared sentinel the implementer can create (`test -f x && …`). `--red` proves the oracle failed at time zero, not that it fails for the right reason. For changed python, `--mutate` flags such a gate as vacuous (mutants survive); for other languages it is `inconclusive`, and a human must read the ledger.
+- `COVERS` is by id. One gate claiming `R1, R2, R3` while testing R1 passes `--status`; only mutation (python) or a human catches it. A FALSIFIER that is well-formed prose but meaningless passes too — Stage B must refuse to grade it.
+- A `--supersede` reason is free text. The cap and the permanent log make abuse visible; they do not judge the reason.
 - Stage B reasoning wrongly about a file it did read. Pointers prove access, not judgment. SUBJECT + FALSIFIER shrink the surface.
 - Auth, payments, production merges: human review and host CI remain the bound.
