@@ -25,7 +25,7 @@ We call the underlying state **illusory completion**: *belief* says finished whi
 
 ## 2. The idea: belief ≠ evidence, and only commands set evidence
 
-Three principles drive everything else.
+Three principles drive everything else — and one consequence: **the checker treats nothing written by an LLM as evidence.** `--run`, `--ci`, `--mutate` and `--report` all re-execute the oracles in the same invocation. `STATE.md`, `evidence/` and `CI.md`'s own `STAGE_A:` line are outputs for humans, never inputs to a verdict.
 
 1. **Separate belief from evidence.** Every gate has two columns in `STATE.md`: `E` (evidence: Satisfied / Refuted / Unknown) and `B` (belief: Affirm / Deny / Unaddress). The agent may write `B`. Only the checker writes `E`. "Done" is `E = Satisfied` for every gate — `B` never counts.
 2. **The implementer cannot declare done.** It produces a *claim* (`ALL MET` from the checker). Acceptance comes from a separate, isolated **LLM CI** role — and even that verdict is validated by the checker for internal consistency.
@@ -51,31 +51,32 @@ The checker refuses gates that observe nothing: titles that are activities ("run
 
 ### 3.2 RED before code (`--red`)
 
-Before any implementation, the test-writer runs every gate. **Each must fail.** A gate that passes before the code exists observes nothing about the code (or is a regression gate and must say so with `RED: pass-ok`). The output hash of each RED run is recorded — proof that this oracle, in this form, was red at time zero.
+Before any implementation, the test-writer runs every gate. **Each must fail.** A gate that passes before the code exists observes nothing about the code (or is a regression gate: `RED: pass-ok`, allowed only when its `FILES` were already tracked in git). `--red` is the only command that writes `FREEZE.sha256`; `--run` refuses any gate without a RED record. This proves the oracle *failed* at time zero — not that it failed for the right reason (see §6).
 
 ### 3.3 Freeze (replaces "human approves the tests")
 
-`--red` writes `FREEZE.sha256` containing the hashes of `LEDGER.md`, every `FILES:` entry, **and the checker itself**. You commit it. From then on:
+`--red` writes `FREEZE.sha256` with the hashes of `LEDGER.md`, `PLAN.md`, every `FILES:` entry, **and the checker itself**. You commit it, once. From then on `--run`:
 
-- `--run` refuses if any hashed file differs from the freeze.
-- `--run` refuses if `FREEZE.sha256` in the working tree differs from `git HEAD` — so re-hashing to make a gate pass is detected, not just forbidden.
-- Editing the checker is caught the same way.
+- refuses if any hashed file differs — checked **before and after** running the gates, so a CHECK that rewrites a frozen file mid-run is caught;
+- refuses if `FREEZE.sha256` differs from `git HEAD`, or if more commits touched it than the `SUPERSEDE` lines it declares — a re-freeze must be declared with `--red --supersede "<reason>"` and stays in the file forever;
+- refuses outside a git repository (no witness → no verdict);
+- refuses if a CHECK names an existing file that is neither in `FILES` (frozen) nor `MUTABLE` (declared changeable).
 
-The implementer's only legal move on a wrong gate is `HANDOFF: ledger-defect`, never "fix the test".
+What git cannot witness — history rewrite, force-push — is outside the checker.
 
 ### 3.4 Traceability (R clauses and `COVERS:`)
 
-`PLAN.md` decomposes the user request into atomic clauses `R1..Rn`. Every gate must declare which clauses it observes; every clause must be observed by at least one gate. This catches the most common quiet failure — *part of the request never reached any oracle* — without asking an LLM whether "the feature is covered".
+`PLAN.md` decomposes the user request into atomic clauses `R1..Rn`. Every gate must declare which clauses it observes; every clause must be observed by at least one gate. This is checked by **id only**. It catches a requirement that reached no oracle at all; it cannot tell whether a gate that claims `COVERS: R2` actually observes R2. That is what `--mutate` is for.
 
 ### 3.5 Falsifiable HIGH-LEVEL outcomes (H lines)
 
 Some outcomes genuinely cannot be a command (game rules hold, UI state is sensible, no credentials in the diff). These go in `PLAN.md` as `H1..Hn`, and each must name its **falsifier** — what observation would make it false:
 
 ```text
-H1: no credentials in the diff | FALSIFIER: a string shaped like an API token appears in the diff
+H1: no credentials in the diff | FALSIFIER: a string shaped like an API token appears in the diff | SUBJECT: src/, $ git diff
 ```
 
-If the falsifier is a command (`$ grep …`, or starts with grep/curl/git/npm/…), the checker refuses: that is a runnable gate, put it in the ledger. Vague phrases ("looks good", "works correctly") are refused. What survives is the small residue an LLM truly has to judge.
+If the falsifier is a command (contains `$`, `|`, `&&`, `./`, or starts with any executable on `PATH`), the checker refuses: that is a runnable gate, put it in the ledger. `SUBJECT` names the repo paths and `$ command` prefixes a CI pointer for this H may cite — a pointer to `/dev/null`, to `.no-illusory-done/`, or to an unrelated file is rejected. Vague phrases are refused.
 
 ### 3.6 Two-stage CI, with verifiable pointers
 
@@ -89,22 +90,26 @@ H2: pass $ git diff main --stat sha=b81d0c4e55aa     # sha256 of that command's 
 H3: fail tier badge missing on /pricing
 ```
 
-`--ci` rehashes the file range or reruns the command. A mismatch means the grader did not read this version / did not run this command, and the pass is downgraded to fail. This does not prove the grader reasoned correctly; it proves it looked at the real artifact rather than answering from memory.
+`--ci` first re-runs Stage A itself (it never trusts a recorded result), then rehashes each file range or reruns each command. The pointer must lie within the H line's `SUBJECT`; the command must exit 0 and produce output. A mismatch downgrades the pass to fail. This proves the grader cited the real artifact in its current state — not that it reasoned correctly about it.
 
 ### 3.7 Machine-generated verdict and stop hook
 
-`--report` derives the final report from the files on disk (`FREEZE`, `last-run.json`, `STATE.md`, `CI.md`). The agent pastes it; it must not hand-write `VERDICT:`. A `Stop` hook runs `--run` and blocks the agent from ending its turn while any gate is unmet — the one point where the host actually enforces anything.
+`--report` re-runs Stage A and the `--ci` validation, then prints `VERDICT:`. The agent pastes it; it must not hand-write one. A `Stop` hook (`--hook`) re-runs the gates and blocks the agent from ending its turn while any is unmet — the one point where the host actually enforces anything.
 
 ### 3.8 Caps, stall, handoff
 
-The checker tracks `iteration` and `stall` (consecutive runs with no change in the evidence vector). Reaching a cap produces `HANDOFF REQUIRED: <unmet ids>` — never a summary that reads like success. `ABANDON: G3 <reason>` is a handoff, not a pass.
+`--run` tracks `iteration` and `stall` (consecutive unmet runs with an unchanged evidence vector; reset on ALL MET) and **enforces** the caps from `PLAN.md`: while gates are unmet and a cap is hit it prints `HANDOFF REQUIRED: <ids>` and exits 3. `ABANDON: G3 <reason>` is a handoff, not a pass.
+
+### 3.9 Mutation (`--mutate`)
+
+`--red` proves an oracle fails without the code; `--mutate` proves it fails with *slightly wrong* code. For every python source file changed since the freeze, the checker generates AST mutants (comparison/arithmetic/boolean operator swaps, constant shifts, `if` negation, `return → return None`), applies each in a throwaway git worktree, and re-runs all gates. A mutant no gate kills is printed as `VACUOUS ORACLE` and the command fails. v1 is python-only; other languages return `inconclusive`.
 
 ## 4. Roles
 
 | Role | Reads | Writes | May not |
 |---|---|---|---|
 | **Test-writer** | request, existing code (as spec) | tests, `LEDGER.md`, `PLAN.md`, runs `--red`, commits freeze | write production code |
-| **Implementer** | ledger, tests, `evidence/*.out` | production code, `B` column of `STATE.md` | touch any frozen file; declare done |
+| **Implementer** | ledger, tests, `evidence/*.out` | production code, `B` column of `STATE.md` | touch any frozen file; re-freeze; declare done |
 | **LLM CI** | clean checkout only | `CI.md` | read implementer chat, PR summary, or checkboxes; change code or oracles |
 
 If you cannot spawn isolated agents, run the roles as phases and reread only files and command output between them. That is a weak barrier; `--red`, the committed freeze, and the checker are the strong ones.
@@ -127,7 +132,7 @@ Stop hook, `.claude/settings.json`:
     "Stop": [{
       "hooks": [{
         "type": "command",
-        "command": "test ! -f .no-illusory-done/LEDGER.md || python3 scripts/nid_check.py --run .no-illusory-done/LEDGER.md >/dev/null 2>&1 || { echo 'NID: unmet gates — see .no-illusory-done/evidence/'; exit 2; }"
+        "command": "python3 scripts/nid_check.py --hook >/dev/null 2>&1 || { echo 'NID: unmet gates — see .no-illusory-done/evidence/'; exit 2; }"
       }]
     }]
   }
@@ -150,7 +155,7 @@ R1: /pricing renders exactly three tiers
 R2: annual toggle shows 20% discount to two decimals
 R3: no new secrets in the diff
 
-H1: tier order matches marketing spec (Basic, Pro, Team) | FALSIFIER: any other order or a fourth card is visible on /pricing
+H1: tier order matches marketing spec (Basic, Pro, Team) | FALSIFIER: any other order or a fourth card is visible on /pricing | SUBJECT: src/pages/pricing.tsx
 
 SETUP: npm ci
 max_iterations: 8
@@ -205,7 +210,8 @@ Repeat until `ALL MET`. The checker updates the `E` column, `iteration`, and `st
 ```bash
 git worktree add ../nid-ci HEAD && cd ../nid-ci
 npm ci                                                           # SETUP from PLAN.md
-python3 scripts/nid_check.py --run .no-illusory-done/LEDGER.md   # Stage A; exit != 0 -> reject, stop
+python3 scripts/nid_check.py --run .no-illusory-done/LEDGER.md      # Stage A; exit != 0 -> reject, stop
+python3 scripts/nid_check.py --mutate .no-illusory-done/LEDGER.md   # survivors -> VACUOUS ORACLE -> reject
 ```
 
 Stage B grades H1 with a pointer, then writes `CI.md`:
@@ -230,15 +236,16 @@ python3 scripts/nid_check.py --report                       # paste verbatim; "d
 
 | Command | Does | Exit 0 iff |
 |---|---|---|
-| `--status LEDGER` | parse ledger + PLAN; traceability and H-line rules | well-formed |
-| `--red LEDGER` | run all gates, require RED, write `FREEZE.sha256` | all required gates failed |
-| `--freeze LEDGER` | rewrite file hashes (keeps RED lines) | — |
-| `--verify-freeze` | working tree vs FREEZE, and FREEZE vs `git HEAD` | match |
-| `--run LEDGER` | rerun all gates, write `evidence/`, update `STATE.md` | ALL MET (runnable gates) |
-| `--ci CI.md` | parse verdict; verify every `pass` pointer; cross-check Stage A record and freeze | `CI: merge-ok` and consistent |
-| `--report` | derive final report from disk | `VERDICT: merge-ok` |
+| `--status LEDGER` | parse ledger + PLAN; traceability, H-line, FILES/MUTABLE rules | well-formed |
+| `--red LEDGER` | run all gates, require RED, write `FREEZE.sha256` (`--supersede "<reason>"` to re-freeze, recorded) | all required gates failed |
+| `--verify-freeze` | hashes vs working tree; FREEZE vs HEAD; commit count vs declared supersedes; RED records present | match |
+| `--run LEDGER` | freeze → run gates → freeze again; update `STATE.md`; enforce caps | ALL MET (exit 1 unmet, 3 handoff) |
+| `--mutate LEDGER` | AST mutants of changed python, each must be killed by a gate | no survivors |
+| `--ci CI.md` | re-run Stage A; validate pointers against SUBJECT; cross-check fields | `CI: merge-ok` consistent |
+| `--report` | re-run Stage A + CI validation; print verdict | `VERDICT: merge-ok` |
+| `--hook` | Stop-hook entry (no ledger → exit 0; else `--run`) | ALL MET |
 
-Gate fields: `CHECK`, `EXPECT` (literal or `/regex/`, matched against the **last non-empty line** of stdout+stderr), `CWD` (default `.`), `TIMEOUT` (default 300 s), `RETRIES` (0–2; a pass on retry is flagged flaky), `FILES`, `KIND` (`cmd` | `llm-judge`), `RED` (`required` | `pass-ok`), `COVERS`.
+Gate fields: `CHECK` (run under `bash -o errexit -o pipefail -o nounset`), `EXPECT` (literal or `/regex/`, **last non-empty line** of stdout+stderr), `CWD`, `TIMEOUT` (300 s), `RETRIES` (0–2; pass-on-retry flagged flaky), `FILES` (frozen), `MUTABLE` (existing files the CHECK reads that may change), `KIND` (`cmd` | `llm-judge`), `RED` (`required` | `pass-ok`), `COVERS`.
 
 ### 5.5 Artifacts
 
@@ -246,17 +253,19 @@ Gate fields: `CHECK`, `EXPECT` (literal or `/regex/`, matched against the **last
 .no-illusory-done/
   PLAN.md            R clauses, H lines with FALSIFIER, SETUP, caps
   LEDGER.md          gates (frozen)
-  FREEZE.sha256      file hashes + RED output hashes (checker-written, committed)
-  STATE.md           E column checker-owned, B column implementer-owned, iteration/stall
-  evidence/          Gn.out per gate, last-run.json
-  CI.md              written only by the CI role, validated by --ci
+  FREEZE.sha256      file hashes + RED records + SUPERSEDE log (checker-written, committed once)
+  STATE.md           E column checker-owned, B column implementer-owned — output only, never evidence
+  evidence/          Gn.out per gate — output only
+  CI.md              written only by the CI role, validated by --ci (which re-runs Stage A)
 ```
 
 ## 6. What this does not solve
 
 - **An agent that never loads the skill**, or deletes `.no-illusory-done/`. Git history shows it; nothing prevents it.
-- **Vacuous tests that still claim coverage.** `--red` proves an oracle observes *something*; `COVERS:` proves every clause has *an* oracle. Neither proves the oracle observes the *right* thing. The planned next guard is `--mutate`: a good test must also fail on near-miss implementations.
-- **A grader that reads the right file and reasons wrongly.** Pointer verification proves the LLM looked at the real artifact; it cannot prove the judgment. FALSIFIER lines shrink that surface; they do not remove it.
+- **History rewrite / force-push.** Git HEAD is the freeze witness; an actor who rewrites history defeats it. Branch protection or a human is the bound.
+- **A requirement omitted from R.** Traceability is by id; nothing checks that R1..Rn is the whole request.
+- **A gate that fails at time zero for the wrong reason** (`test -f sentinel && …`). `--red` cannot distinguish "no implementation" from "no sentinel". `--mutate` narrows this for python; it does not close it, and v1 covers python only.
+- **A grader that reads the right file and reasons wrongly.** Pointers + SUBJECT prove access to the relevant artifact, not judgment.
 - **Auth, payments, production merges.** Human review and host CI remain the right bound there.
 
 ## 7. Lineage
