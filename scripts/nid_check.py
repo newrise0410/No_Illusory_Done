@@ -40,6 +40,7 @@ import time
 from pathlib import Path
 
 SELF = Path(__file__).resolve()
+CURRENT_ROOT: Path | None = None
 GATE_RE = re.compile(r"^- \[( |x|X)\] (G\d+):\s*(.+?)\s*$")
 FIELD_RE = re.compile(r"^\s*([A-Z]+):\s*(.*?)\s*$")
 FIELDS = {"CHECK", "EXPECT", "CWD", "TIMEOUT", "RETRIES", "FILES", "KIND", "RED", "EVIDENCE", "COVERS", "ENV"}
@@ -103,6 +104,8 @@ class Ctx:
         self.evidence = self.nid / "evidence"
         self.ci = self.nid / "CI.md"
         os.chdir(self.root)
+        global CURRENT_ROOT
+        CURRENT_ROOT = self.root
 
     def rel(self, p: Path) -> str:
         return os.path.relpath(p.resolve(), self.root)
@@ -380,6 +383,14 @@ CRASH_KILL = re.compile(r"(ImportError|ModuleNotFoundError|SyntaxError|NameError
 def clean_env(g: Gate | None = None) -> dict:
     """Nothing inherited from the caller's shell except a whitelist; gate ENV: values are frozen literals."""
     env = {k: os.environ[k] for k in CLEAN_ENV_KEYS if k in os.environ}
+    # PATH: absolute, outside the repo, no empty/'.' entries — an implementer-added bin/ must never shadow a tool.
+    safe = []
+    for d in env.get("PATH", "/usr/bin:/bin").split(os.pathsep):
+        if not d or not os.path.isabs(d): continue
+        rd = os.path.realpath(d)
+        if CURRENT_ROOT is not None and (rd == str(CURRENT_ROOT) or rd.startswith(str(CURRENT_ROOT) + os.sep)): continue
+        safe.append(d)
+    env["PATH"] = os.pathsep.join(safe) or "/usr/bin:/bin"
     env.update({"PYTHONNOUSERSITE": "1", "PYTHONDONTWRITEBYTECODE": "1",
                 "NODE_OPTIONS": "", "CI": "1", "NID": "1"})
     if g is not None:
