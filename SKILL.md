@@ -82,7 +82,7 @@ Checker enforces: CHECK runs under `bash -o errexit -o pipefail -o nounset` (a `
 
 ```json
 { "hooks": { "Stop": [{ "hooks": [{ "type": "command",
-  "command": "python3 scripts/nid_check.py --hook || { echo 'NID: unmet gates — see .no-illusory-done/evidence/'; exit 2; }" }] }] } }
+  "command": "python3 scripts/nid_check.py --hook" }] }] } }
 ```
 
 `--hook` exits 0 when no ledger exists, otherwise behaves as `--run`. Exit 2 blocks the stop.

@@ -14,7 +14,7 @@ Subcommands (exit 0 only on the stated success):
   --ci CI.md           re-run Stage A, then validate CI.md pointers (bound to SUBJECT)
   --mutate LEDGER      python AST mutants of changed source; each must be killed
   --report             re-run everything and print the machine report
-  --hook               Stop-hook entry: --run, exit 2 on unmet (quiet)
+  --hook               Stop-hook entry: no ledger -> exit 0; else --run, exit 2 on unmet/handoff
 
 PLAN.md:
   R1: <atomic requirement>
@@ -491,8 +491,8 @@ def cmd_run(ctx: Ctx, hook=False) -> None:
         print(f"UNMET: {','.join(unmet)}")
         if it >= caps["max_iterations"] or stall >= caps["stall_iters"]:
             print(f"HANDOFF REQUIRED: {','.join(unmet)} (iteration {it}/{caps['max_iterations']}, stall {stall}/{caps['stall_iters']})")
-            sys.exit(3)
-        sys.exit(1)
+            sys.exit(2 if hook else 3)
+        sys.exit(2 if hook else 1)
     print("ALL MET" + (f" (llm-judge pending CI: {','.join(judge)})" if judge else ""))
     sys.exit(0)
 
