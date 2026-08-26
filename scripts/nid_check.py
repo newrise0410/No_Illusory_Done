@@ -14,7 +14,7 @@ Subcommands (exit 0 only on the stated success):
   --ci CI.md           re-run Stage A, then validate CI.md pointers (bound to SUBJECT)
   --mutate LEDGER      python AST mutants of changed source; each must be killed
   --report             re-run everything and print the machine report
-  --hook               Stop-hook entry: no ledger -> exit 0; else --run, exit 2 on unmet/handoff
+  --hook               Stop-hook entry: no ledger or no freeze yet -> exit 0; else --run, exit 2 on unmet/handoff
 
 PLAN.md:
   R1: <atomic requirement>
@@ -101,7 +101,8 @@ class Ctx:
         self.root = self.nid.parent
         if self.nid.name != ".no-illusory-done" or self.ledger.name != "LEDGER.md":
             die(f"ledger must be <repo>/.no-illusory-done/LEDGER.md (got {self.ledger})")
-        top = subprocess.run(["git", "-C", str(self.root), "rev-parse", "--show-toplevel"], capture_output=True, text=True).stdout.strip()
+        top = subprocess.run(["git", "-C", str(self.root), "rev-parse", "--show-toplevel"], capture_output=True, text=True,
+                             env={**GIT_ENV, "PATH": safe_path(self.root)}).stdout.strip()
         if not top or Path(top).resolve() != self.root:
             die(f".no-illusory-done must sit at the git toplevel ({top or 'not a git repo'}), not {self.root}")
         self.plan = self.nid / "PLAN.md"
@@ -332,9 +333,16 @@ def parse_ledger(ctx: Ctx) -> list[Gate]:
         except ValueError as e:
             die(f"{g.id}: CHECK is not parseable as shell words ({e})")
         toks = set(words)
+        prod = parse_plan(ctx)[3]["_product"]
         for tok in toks:
             if not tok or tok == "--": continue
             p = cwd / tok
+            if p.is_dir() and tok not in (".", "./") and not str(p.resolve()).startswith(str(ctx.nid)):
+                reld = ctx.rel(p)
+                if not under(reld, prod):
+                    inside = [ctx.rel(x) for x in p.rglob("*") if x.is_file()]
+                    if any(x not in declared for x in inside):
+                        die(f"{g.id}: CHECK names directory {reld} outside PRODUCT; every file under it must be in FILES (or name files explicitly)")
             if p.is_file() and not str(p.resolve()).startswith(str(ctx.nid)):
                 relp = ctx.rel(p)
                 if relp not in declared and tok not in declared:
@@ -459,7 +467,7 @@ def influence_check(ctx: Ctx, gates: list[Gate]) -> None:
         p = ctx.root / f
         if p.is_symlink() and not inside_repo(ctx, p):
             die(f"symlink {f} added since the freeze points outside the repo")
-    bad = [f for f in changed if INFLUENCE.search(f) and f not in frozen and f not in expected]
+    bad = [f for f in changed_files(ctx, fcommit, include_ignored=True) if INFLUENCE.search(f) and f not in frozen and f not in expected]
     if bad:
         die(f"runner-influencing files changed since the freeze and are not frozen or EXPECTED_NEW: {', '.join(bad)}")
 
@@ -500,13 +508,25 @@ def read_freeze(ctx: Ctx):
     return files, reds, sup
 
 
-GIT_ENV = {**{k: os.environ[k] for k in ("PATH", "HOME", "LANG", "LC_ALL", "TMPDIR") if k in os.environ},
-           "GIT_NO_REPLACE_OBJECTS": "1", "GIT_CONFIG_NOSYSTEM": "1", "GIT_TERMINAL_PROMPT": "0"}
+GIT_ENV = {**{k: os.environ[k] for k in ("HOME", "LANG", "LC_ALL", "TMPDIR") if k in os.environ},
+           "GIT_NO_REPLACE_OBJECTS": "1", "GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_GLOBAL": "/dev/null", "GIT_TERMINAL_PROMPT": "0"}
+
+
+def safe_path(root: Path | None) -> str:
+    out = []
+    for d in os.environ.get("PATH", "/usr/bin:/bin").split(os.pathsep):
+        if not d or not os.path.isabs(d): continue
+        rd = os.path.realpath(d)
+        if root is not None and (rd == str(root) or rd.startswith(str(root) + os.sep)): continue
+        out.append(d)
+    return os.pathsep.join(out) or "/usr/bin:/bin"
 
 
 def git(ctx: Ctx, *args) -> subprocess.CompletedProcess:
-    """All git reads ignore replacement objects, aliases, and inherited env; hooks are not invoked by reads."""
-    return subprocess.run(["git", "--no-replace-objects", "-c", "core.hooksPath=/dev/null", "-C", str(ctx.root), *args], capture_output=True, text=True, env=GIT_ENV)
+    """All git reads ignore replacement objects, aliases, hooks, global/system config and inherited env; git itself is
+    resolved through a PATH with relative and repo-internal entries removed."""
+    env = {**GIT_ENV, "PATH": safe_path(ctx.root)}
+    return subprocess.run(["git", "--no-replace-objects", "-c", "core.hooksPath=/dev/null", "-C", str(ctx.root), *args], capture_output=True, text=True, env=env)
 
 
 def verify_freeze(ctx: Ctx, gates: list[Gate] | None = None, quiet=False) -> bool:
@@ -661,7 +681,7 @@ def set_ref_blob(ctx: Ctx, name: str, content: str) -> None:
     """Compare-and-swap so concurrent worktrees cannot lose updates."""
     old = git(ctx, "rev-parse", "--verify", "-q", f"refs/nid/{name}").stdout.strip()
     h = subprocess.run(["git", "--no-replace-objects", "-C", str(ctx.root), "hash-object", "-w", "--stdin"], input=content,
-                       capture_output=True, text=True, env=GIT_ENV).stdout.strip()
+                       capture_output=True, text=True, env={**GIT_ENV, "PATH": safe_path(ctx.root)}).stdout.strip()
     args = ["update-ref", f"refs/nid/{name}", h] + ([old] if old else [])
     if git(ctx, *args).returncode != 0:
         die(f"refs/nid/{name} changed concurrently (another --run in a linked worktree?) — rerun")
@@ -902,13 +922,16 @@ class Mutator(ast.NodeTransformer):
         return node
 
 
-def changed_files(ctx: Ctx, since: str) -> list[str]:
-    """Committed-since-freeze + uncommitted + untracked."""
+def changed_files(ctx: Ctx, since: str, include_ignored: bool = False) -> list[str]:
+    """Committed-since-freeze + uncommitted + untracked (+ .gitignore'd files when include_ignored)."""
     def z(*args):
         return [x for x in git(ctx, "-c", "core.quotePath=false", *args).stdout.split("\0") if x]
     out = z("diff", "--name-only", "-z", since, "HEAD", "--")
     out += z("diff", "--name-only", "-z", "HEAD", "--")
-    out += z("ls-files", "--others", "--exclude-standard", "-z")
+    if include_ignored:
+        out += [x for x in z("ls-files", "--others", "-z") if ".git/" not in x and not x.startswith(".no-illusory-done/")]
+    else:
+        out += z("-c", "core.excludesFile=/dev/null", "ls-files", "--others", "--exclude-per-directory=.gitignore", "-z")
     return sorted(set(out))
 
 
@@ -920,7 +943,7 @@ def mutation_verdict(ctx: Ctx, gates: list[Gate], verbose=False) -> dict:
     """Returns {"status": pass|fail|inconclusive, "survivors": [...], "total": n, "note": str}."""
     frozen, _, _ = read_freeze(ctx)
     fcommit = git(ctx, "log", "-1", "--format=%H", "--", ctx.rel(ctx.freeze)).stdout.strip()
-    changed = [f for f in changed_files(ctx, fcommit) if f.endswith(".py") and f not in frozen and not f.startswith("scripts/nid_check") and (ctx.root / f).is_file()]
+    changed = [f for f in changed_files(ctx, fcommit, include_ignored=True) if f.endswith(".py") and f not in frozen and not f.startswith("scripts/nid_check") and (ctx.root / f).is_file()]
     changed = sorted(set(changed))
     if not changed:
         return {"status": "inconclusive", "survivors": [], "total": 0, "note": "no changed .py source since freeze (mutation v1: python only)"}
@@ -1044,7 +1067,11 @@ def main() -> None:
             here = Path.cwd().resolve()
             if not any((d / ".no-illusory-done" / "LEDGER.md").exists() for d in (here, *here.parents)):
                 sys.exit(0)
-            cmd_run(Ctx(None), hook=True)
+            ctx = Ctx(None)
+            if not ctx.freeze.exists():
+                print("NID: ledger exists but no freeze yet (test-writer phase) — stop allowed; run --red before implementing")
+                sys.exit(0)
+            cmd_run(ctx, hook=True)
     except SystemExit:
         raise
     except Exception as e:  # any crash is a failed verdict, never a pass

@@ -89,7 +89,7 @@ Checker enforces: CHECK runs under `bash -o errexit -o pipefail -o nounset` (a `
   "command": "python3 scripts/nid_check.py --hook" }] }] } }
 ```
 
-`--hook` exits 0 when no ledger exists, otherwise behaves as `--run`. Exit 2 blocks the stop.
+`--hook` exits 0 when no ledger exists or when the ledger is not yet frozen (test-writer phase); otherwise it behaves as `--run` and exit 2 blocks the stop.
 
 Environment note: CHECKs run with PATH stripped of relative and repo-internal entries, so a `.venv/bin` or `node_modules/.bin` **inside** the repo is never used — toolchains must live outside the checkout (VIRTUAL_ENV/CARGO_HOME/GOPATH/JAVA_HOME are passed through only when outside the repo). HOME is kept; npm/pip/git user configs are pointed at `/dev/null`.
 
