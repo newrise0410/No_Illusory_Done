@@ -57,6 +57,7 @@ BAD_CHECK = [
     (re.compile(r"passWithNoTests|--no-verify|\|\|\s*true"), "skip/soften flag"),
     (re.compile(r"python[3]?\s+-c\b"), "python -c"),
     (re.compile(r"(^|\s)(touch|cp|mv|rm|tee|sed\s+-i|>>?)\s"), "mutating command in CHECK"),
+    (re.compile(r"[$`]|<<|(^|[;&|(]\s*)\w+=\S"), "shell expansion/heredoc/assignment (use a repo-owned script)"),
 ]
 
 
@@ -133,7 +134,7 @@ def parse_plan(ctx: Ctx):
         die("PLAN.md missing")
     reqs, highs, setup = {}, {}, []
     caps = {"max_iterations": 8, "stall_iters": 3, "max_ci_attempts": 3}
-    for ln, raw in enumerate(ctx.plan.read_text(encoding="utf-8").splitlines(), 1):
+    for ln, raw in enumerate(ctx.plan.read_text(encoding="utf-8").replace("\r", "").splitlines(), 1):
         line = raw.strip().lstrip("-* ").strip()
         m = CAP_RE.match(line)
         if m:
@@ -186,7 +187,7 @@ def falsifier_is_command(f: str) -> bool:
 
 
 def parse_ledger(ctx: Ctx) -> list[Gate]:
-    text = ctx.ledger.read_text(encoding="utf-8") if ctx.ledger.exists() else ""
+    text = ctx.ledger.read_text(encoding="utf-8").replace("\r", "") if ctx.ledger.exists() else ""
     if not text.strip(): die("ledger missing or empty")
     gates, cur = [], None
     for ln, line in enumerate(text.splitlines(), 1):
@@ -489,8 +490,14 @@ def verify_pointer(ctx: Ctx, hid: str, ptr: str, subjects: list[str]) -> str | N
             return f"{hid}: pointer outside repo: {pth}"
         if str(p.resolve()).startswith(str(ctx.nid)): return f"{hid}: pointer inside .no-illusory-done (not an artifact)"
         if not p.is_file(): return f"{hid}: pointer file missing {pth}"
-        if not any(not s.startswith("$ ") and (rp == s.rstrip("/") or rp.startswith(s.rstrip("/") + "/")) for s in subjects):
+        exact = any(not s.startswith("$ ") and rp == s.rstrip("/") for s in subjects)
+        under = any(not s.startswith("$ ") and rp.startswith(s.rstrip("/") + "/") for s in subjects)
+        if not (exact or under):
             return f"{hid}: pointer {rp} not under SUBJECT {subjects}"
+        if under and not exact:
+            fcommit = git(ctx, "log", "-1", "--format=%H", "--", ctx.rel(ctx.freeze)).stdout.strip()
+            if rp not in changed_files(ctx, fcommit):
+                return f"{hid}: pointer {rp} is under SUBJECT but unchanged since the freeze (cites nothing about this change); name it exactly in SUBJECT if intended"
         if l1:
             lines = p.read_text(encoding="utf-8", errors="replace").splitlines()
             a, b = int(l1), int(l2 or l1)
@@ -732,9 +739,10 @@ def main() -> None:
             ctx = Ctx(None); sys.exit(0 if verify_freeze(ctx, parse_ledger(ctx)) else 1)
         elif a.report: cmd_report(Ctx(None))
         elif a.hook:
-            ctx = Ctx(None)
-            if not ctx.ledger.exists(): sys.exit(0)
-            cmd_run(ctx, hook=True)
+            here = Path.cwd().resolve()
+            if not any((d / ".no-illusory-done" / "LEDGER.md").exists() for d in (here, *here.parents)):
+                sys.exit(0)
+            cmd_run(Ctx(None), hook=True)
     except SystemExit:
         raise
     except Exception as e:  # any crash is a failed verdict, never a pass
