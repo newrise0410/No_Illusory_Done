@@ -473,7 +473,7 @@ def clean_env(g: Gate | None = None) -> dict:
     env["PATH"] = os.pathsep.join(safe) or "/usr/bin:/bin"
     for k in TOOLCHAIN_KEYS:  # toolchain homes are allowed only when they live outside the repo
         v = os.environ.get(k)
-        if v and os.path.isabs(v) and not (CURRENT_ROOT and os.path.realpath(v).startswith(str(CURRENT_ROOT) + os.sep)):
+        if v and os.path.isabs(v) and not (CURRENT_ROOT and (os.path.realpath(v) == str(CURRENT_ROOT) or os.path.realpath(v).startswith(str(CURRENT_ROOT) + os.sep))):
             env[k] = v
     env.update({"PYTHONNOUSERSITE": "1", "PYTHONDONTWRITEBYTECODE": "1", "NPM_CONFIG_USERCONFIG": "/dev/null",
                 "PIP_CONFIG_FILE": "/dev/null", "GIT_CONFIG_GLOBAL": "/dev/null", "GIT_CONFIG_NOSYSTEM": "1",
@@ -606,14 +606,24 @@ def verify_freeze(ctx: Ctx, gates: list[Gate] | None = None, quiet=False) -> boo
             fcommit = git(ctx, "log", "-1", "--format=%H", "--", relf).stdout.strip()
             remotes = git(ctx, "remote").stdout.split()
             if remotes:
-                tips = []
+                witnessed, unreachable = [], []
                 for rname in remotes:
-                    lr = git(ctx, "ls-remote", "--heads", "--tags", rname)
+                    try:
+                        lr = subprocess.run(["git", "--no-replace-objects", "-c", "core.hooksPath=/dev/null", "-C", str(ctx.root),
+                                             "ls-remote", "--heads", "--tags", rname], capture_output=True, text=True, timeout=30,
+                                            env={**GIT_ENV, "PATH": safe_path(ctx.root)})
+                    except subprocess.TimeoutExpired:
+                        unreachable.append(rname); continue
                     if lr.returncode != 0:
-                        problems.append(f"cannot query remote {rname} (offline?) — remote witness unavailable, fail closed"); continue
-                    tips += [ln.split()[0] for ln in lr.stdout.splitlines() if ln.strip()]
-                if not any(git(ctx, "merge-base", "--is-ancestor", fcommit, t).returncode == 0 for t in tips):
-                    problems.append(f"freeze commit {fcommit[:8]} is not reachable from any ref actually on the remote (push it)")
+                        unreachable.append(rname); continue
+                    tips = [ln.split()[0] for ln in lr.stdout.splitlines() if ln.strip()]
+                    if any(git(ctx, "merge-base", "--is-ancestor", fcommit, t).returncode == 0 for t in tips):
+                        witnessed.append(rname)
+                if not witnessed:
+                    problems.append(f"freeze commit {fcommit[:8]} is not reachable from any ref on any reachable remote "
+                                    f"(reachable: {[r for r in remotes if r not in unreachable]}, unreachable: {unreachable}) — push it, or go online")
+                elif unreachable and not quiet:
+                    print(f"FREEZE NOTE: witnessed by {witnessed}; unreachable remotes ignored: {unreachable}")
             elif not quiet:
                 print("FREEZE WARNING: no git remote — the freeze witness is local history only (rewritable)")
             if n != 1 + len(sup):
