@@ -49,6 +49,8 @@ INFLUENCE = re.compile(r"(^|/)(conftest\.py|sitecustomize\.py|usercustomize\.py|
                        r"\.env[^/]*|package\.json|jest\.config\.[^/]+|vitest\.config\.[^/]+|babel\.config\.[^/]+|\.babelrc|tsconfig[^/]*\.json|"
                        r"\.npmrc|\.mocharc[^/]*|Makefile|\.bashrc|\.zshrc|\.profile|__init__\.py)$")
 CLEAN_ENV_KEYS = ("PATH", "HOME", "LANG", "LC_ALL", "TMPDIR", "TERM", "USER", "SHELL")
+# SUBJECT commands whose output does not depend on the change under review.
+CONSTANT_CMD = re.compile(r"^(git\s+(log|rev-parse|rev-list|describe|branch|remote|config|status|tag|show-ref|symbolic-ref)|date|whoami|pwd|uname|hostname|id|ls|wc|cat|head|tail|stat|md5|shasum|sha256sum|python[3]?\s+--version|node\s+-v)\b")
 R_RE = re.compile(r"^(R\d+):\s*(.+?)\s*$")
 H_RE = re.compile(r"^(H\d+):\s*(.+?)\s*$")
 CAP_RE = re.compile(r"^(max_iterations|stall_iters|max_ci_attempts|max_supersedes|max_gates_per_r):\s*(\d+)\s*$")
@@ -174,6 +176,8 @@ def parse_plan(ctx: Ctx):
                 if s.startswith("$ "):
                     if len(s) < 6 or any(rx.search(s[2:]) for rx, _ in BAD_CHECK):
                         die(f"PLAN.md {hid}: SUBJECT command too short or forbidden: {s}")
+                    if CONSTANT_CMD.match(s[2:].strip()):
+                        die(f"PLAN.md {hid}: SUBJECT command output does not depend on the change ({s}); cite a command that observes the product")
                     continue
                 sp = (ctx.root / s)
                 if not inside_repo(ctx, sp) or not sp.is_file():
@@ -263,7 +267,9 @@ def parse_ledger(ctx: Ctx) -> list[Gate]:
         # Every existing file the CHECK names must be frozen (FILES). A path that does not
         # exist yet is product output the implementation will create.
         declared = set(g.files)
-        for tok in PATHISH.findall(chk):
+        toks = set(PATHISH.findall(chk)) | {t.strip("\"'") for t in re.split(r"[\s;&|()<>]+", chk) if t.strip("\"'")}
+        for tok in toks:
+            if tok.startswith("-"): continue
             p = cwd / tok
             if p.is_file() and not str(p.resolve()).startswith(str(ctx.nid)):
                 relp = ctx.rel(p)
@@ -595,6 +601,11 @@ def verify_pointer(ctx: Ctx, hid: str, ptr: str, subjects: list[str]) -> str | N
         elif not any(not s.startswith("$ ") and rp == s for s in subjects):
             return f"{hid}: pointer {rp} is not one of the SUBJECT files {[x for x in subjects if not x.startswith('$ ')]}"
         if not inside_repo(ctx, p): return f"{hid}: pointer resolves outside the repo"
+        frozen = set(read_freeze(ctx)[0])
+        if rp in frozen: return f"{hid}: pointer {rp} is a frozen oracle file, not an artifact of the change"
+        fcommit = git(ctx, "log", "-1", "--format=%H", "--", ctx.rel(ctx.freeze)).stdout.strip()
+        if rp not in changed_files(ctx, fcommit):
+            return f"{hid}: pointer {rp} is unchanged since the freeze; it cannot evidence this change"
         if l1:
             lines = p.read_text(encoding="utf-8", errors="replace").splitlines()
             a, b = int(l1), int(l2 or l1)
