@@ -399,6 +399,9 @@ def cmd_red(ctx: Ctx, supersede: str | None = None) -> None:
         if not supersede or len(supersede.strip()) < 12:
             die("FREEZE.sha256 already exists. Re-freezing requires --supersede '<reason>' (ledger-defect handoff); it is recorded permanently.")
         _, _, sup = read_freeze(ctx)
+        _, _, _, caps = parse_plan(ctx)
+        if len(sup) + 1 > caps["max_supersedes"]:
+            die(f"re-freeze #{len(sup) + 1} exceeds max_supersedes={caps['max_supersedes']}: a human must raise the cap in PLAN.md (frozen) — HANDOFF")
         prev = git(ctx, "log", "-1", "--format=%h", "--", ctx.rel(ctx.freeze)).stdout.strip() or "uncommitted"
         sup.append(f"{len(sup) + 1} prev={prev} {supersede.strip()}")
     bad, reds = [], []
