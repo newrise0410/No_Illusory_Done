@@ -310,12 +310,16 @@ def run_gate(ctx: Ctx, g: Gate, record=True) -> dict:
     for attempt in range(retries + 1):
         t0 = time.time()
         try:
-            p = subprocess.run(["bash", "-o", "errexit", "-o", "pipefail", "-o", "nounset", "-c", g.f["CHECK"]],
-                               cwd=str(cwd), timeout=timeout, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                               env=clean_env(g))
-            out, code, to = p.stdout.decode("utf-8", "replace"), p.returncode, False
-        except subprocess.TimeoutExpired as e:
-            out, code, to = (e.output or b"").decode("utf-8", "replace") + "\n[NID TIMEOUT]", -1, True
+            proc = subprocess.Popen(["bash", "-o", "errexit", "-o", "pipefail", "-o", "nounset", "-c", g.f["CHECK"]],
+                                    cwd=str(cwd), stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                                    env=clean_env(g), start_new_session=True)
+            try:
+                raw, _ = proc.communicate(timeout=timeout)
+                out, code, to = raw.decode("utf-8", "replace"), proc.returncode, False
+            except subprocess.TimeoutExpired:
+                kill_group(proc)
+                raw, _ = proc.communicate()
+                out, code, to = raw.decode("utf-8", "replace") + "\n[NID TIMEOUT: process group killed]", -1, True
         except OSError as e:
             out, code, to = f"[NID EXEC ERROR] {e}", -1, False
         em = expect_match(g.f["EXPECT"], out)
@@ -331,6 +335,17 @@ def run_gate(ctx: Ctx, g: Gate, record=True) -> dict:
     return {"id": g.id, "pass": last["pass"], "exit": last["exit"], "expect_match": last["expect_match"],
             "sha256": last["sha256"], "bytes": last["bytes"], "attempts": attempts,
             "flaky": last["pass"] and len(attempts) > 1}
+
+
+def kill_group(proc: subprocess.Popen) -> None:
+    import signal
+    try:
+        os.killpg(proc.pid, signal.SIGKILL)
+    except (ProcessLookupError, PermissionError):
+        pass
+
+
+CRASH_KILL = re.compile(r"(ImportError|ModuleNotFoundError|SyntaxError|NameError|IndentationError|cannot import name)")
 
 
 def clean_env(g: Gate | None = None) -> dict:
@@ -784,12 +799,18 @@ def mutation_verdict(ctx: Ctx, gates: list[Gate], max_per_file=20, verbose=False
                         if s.is_file(): d.parent.mkdir(parents=True, exist_ok=True); shutil.copy2(s, d)
                     (wt / f).write_text(ast.unparse(tree), encoding="utf-8")
                     sub = Ctx(wt / ".no-illusory-done" / "LEDGER.md")
-                    killed = any(not r["pass"] for r in run_all(sub, gates, record=False).values())
+                    rs = run_all(sub, gates, record=True)
+                    failed = [gid for gid, r in rs.items() if not r["pass"]]
+                    # A kill counts only if some gate failed WITHOUT an import/syntax crash: a mutant that
+                    # merely breaks importing proves the test imported the module, not that it tested it.
+                    real = [gid for gid in failed if not CRASH_KILL.search((sub.evidence / f"{gid}.out").read_text(errors="replace") if (sub.evidence / f"{gid}.out").exists() else "")]
+                    killed = bool(real)
+                    crash_only = bool(failed) and not real
                 finally:
                     os.chdir(ctx.root)
                     git(ctx, "worktree", "remove", "--force", str(wt))
-            if verbose: print(f"{f} #{i} {m.desc}: {'killed' if killed else 'SURVIVED'}")
-            if not killed: survivors.append(f"{f}#{i} {m.desc}")
+            if verbose: print(f"{f} #{i} {m.desc}: {'killed' if killed else ('SURVIVED (crash-only: import/syntax error, not an assertion)' if crash_only else 'SURVIVED')}")
+            if not killed: survivors.append(f"{f}#{i} {m.desc}" + (" [crash-only]" if crash_only else ""))
     if total == 0:
         return {"status": "inconclusive", "survivors": [], "total": 0, "note": "changed python has no mutable nodes"}
     return {"status": "fail" if survivors else "pass", "survivors": survivors, "total": total, "note": ""}
