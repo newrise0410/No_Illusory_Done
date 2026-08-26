@@ -53,7 +53,7 @@ CLEAN_ENV_KEYS = ("PATH", "HOME", "LANG", "LC_ALL", "TMPDIR", "TERM", "USER", "S
 CONSTANT_CMD = re.compile(r"^(git\s+(log|rev-parse|rev-list|describe|branch|remote|config|status|tag|show-ref|symbolic-ref)|date|whoami|pwd|uname|hostname|id|ls|wc|cat|head|tail|stat|md5|shasum|sha256sum|python[3]?\s+--version|node\s+-v)\b")
 R_RE = re.compile(r"^(R\d+):\s*(.+?)\s*$")
 H_RE = re.compile(r"^(H\d+):\s*(.+?)\s*$")
-CAP_RE = re.compile(r"^(max_iterations|stall_iters|max_ci_attempts|max_supersedes|max_gates_per_r):\s*(\d+)\s*$")
+CAP_RE = re.compile(r"^(max_iterations|stall_iters|max_ci_attempts|max_supersedes|max_gates_per_r|max_mutants_per_file):\s*(\d+)\s*$")
 VAGUE = re.compile(r"looks good|covers the feature|works correctly|as expected|properly|correctly", re.I)
 # Tokens in a CHECK that look like paths.
 PATHISH = re.compile(r"(?<![\w-])((?:\.{0,2}/)?[\w.-]+(?:/[\w.-]+)*\.[A-Za-z0-9]{1,8}|(?:\./|\.\./)[\w./-]+)")
@@ -142,7 +142,7 @@ def parse_plan(ctx: Ctx):
         die("PLAN.md missing")
     sanity_text("PLAN.md", ctx.plan.read_text(encoding="utf-8"))
     reqs, highs, setup = {}, {}, []
-    caps = {"max_iterations": 8, "stall_iters": 3, "max_ci_attempts": 3, "max_supersedes": 1, "max_gates_per_r": 4}
+    caps = {"max_iterations": 8, "stall_iters": 3, "max_ci_attempts": 3, "max_supersedes": 1, "max_gates_per_r": 4, "max_mutants_per_file": 0}
     for ln, raw in enumerate(ctx.plan.read_text(encoding="utf-8").replace("\r", "").splitlines(), 1):
         line = raw.strip().lstrip("-* ").strip()
         m = CAP_RE.match(line)
@@ -812,7 +812,7 @@ def count_mutants(src: str) -> int:
     m = Mutator(10**9); m.visit(ast.parse(src)); return m.count
 
 
-def mutation_verdict(ctx: Ctx, gates: list[Gate], max_per_file=20, verbose=False) -> dict:
+def mutation_verdict(ctx: Ctx, gates: list[Gate], verbose=False) -> dict:
     """Returns {"status": pass|fail|inconclusive, "survivors": [...], "total": n, "note": str}."""
     frozen, _, _ = read_freeze(ctx)
     fcommit = git(ctx, "log", "-1", "--format=%H", "--", ctx.rel(ctx.freeze)).stdout.strip()
@@ -820,12 +820,17 @@ def mutation_verdict(ctx: Ctx, gates: list[Gate], max_per_file=20, verbose=False
     changed = sorted(set(changed))
     if not changed:
         return {"status": "inconclusive", "survivors": [], "total": 0, "note": "no changed .py source since freeze (mutation v1: python only)"}
-    survivors, total = [], 0
+    survivors, total, truncated = [], 0, []
+    _, _, _, caps = parse_plan(ctx)
+    cap = caps["max_mutants_per_file"]
     for f in changed:
         src = (ctx.root / f).read_text(encoding="utf-8")
-        n = min(count_mutants(src), max_per_file)
-        if n == 0: continue
-        if count_mutants(src) > max_per_file: print(f"NOTE: {f}: {count_mutants(src)} mutants, testing first {max_per_file}")
+        all_n = count_mutants(src)
+        if all_n == 0: continue
+        n = all_n if cap == 0 else min(all_n, cap)
+        if n < all_n:
+            truncated.append(f"{f}: {n}/{all_n}")
+            print(f"NOTE: {f}: {all_n} mutants, cap max_mutants_per_file={cap} -> result can only be fail or inconclusive")
         for i in range(1, n + 1):
             total += 1
             m = Mutator(i); tree = m.visit(ast.parse(src)); ast.fix_missing_locations(tree)
@@ -854,7 +859,11 @@ def mutation_verdict(ctx: Ctx, gates: list[Gate], max_per_file=20, verbose=False
             if not killed: survivors.append(f"{f}#{i} {m.desc}" + (" [crash-only]" if crash_only else ""))
     if total == 0:
         return {"status": "inconclusive", "survivors": [], "total": 0, "note": "changed python has no mutable nodes"}
-    return {"status": "fail" if survivors else "pass", "survivors": survivors, "total": total, "note": ""}
+    if survivors:
+        return {"status": "fail", "survivors": survivors, "total": total, "note": ""}
+    if truncated:
+        return {"status": "inconclusive", "survivors": [], "total": total, "note": "mutants truncated by cap: " + "; ".join(truncated)}
+    return {"status": "pass", "survivors": [], "total": total, "note": ""}
 
 
 def cmd_mutate(ctx: Ctx) -> None:

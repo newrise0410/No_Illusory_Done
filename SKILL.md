@@ -43,7 +43,7 @@ R2: annual toggle shows a 20.00% discount
 H1: tier order matches marketing spec | FALSIFIER: any order other than Basic, Pro, Team is visible | SUBJECT: src/pages/pricing.tsx, $ npx playwright test tiers
 SETUP: npm ci
 max_iterations: 8        stall_iters: 3
-max_supersedes: 1        max_gates_per_r: 4
+max_supersedes: 1        max_gates_per_r: 4        max_mutants_per_file: 0   # 0 = run all; a cap makes mutation inconclusive, never pass
 ```
 
 - `R1..Rn` — atomic clauses of the **current** request. Every gate lists the Rs it observes (`COVERS:`); every R must be covered. Checked by id only — this catches omitted requirements, not lying gates.

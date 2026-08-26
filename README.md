@@ -105,7 +105,7 @@ H3: fail tier badge missing on /pricing
 
 ### 3.9 Mutation (`--mutate`)
 
-`--red` proves an oracle fails without the code; `--mutate` proves it fails with *slightly wrong* code. For every python source file changed since the freeze, the checker generates AST mutants (comparison/arithmetic/boolean operator swaps, constant shifts, `if` negation, `return → return None`), applies each in a throwaway git worktree, and re-runs all gates. A mutant no gate kills is printed as `VACUOUS ORACLE` and the command fails. Zero mutants (no changed python, or python with nothing to mutate) is `inconclusive` — exit 1, shown in `--report`, not silently a pass. v1 is python-only.
+`--red` proves an oracle fails without the code; `--mutate` proves it fails with *slightly wrong* code. For every python source file changed since the freeze, the checker generates AST mutants (comparison/arithmetic/boolean operator swaps, constant shifts, `if` negation, `return → return None`), applies each in a throwaway git worktree, and re-runs all gates. All mutants run (an optional `max_mutants_per_file` cap makes the result `inconclusive`, never `pass`). A mutant no gate kills is printed as `VACUOUS ORACLE` and the command fails. Zero mutants (no changed python, or python with nothing to mutate) is `inconclusive` — exit 1, shown in `--report`, not silently a pass. v1 is python-only.
 
 ## 4. Roles
 
