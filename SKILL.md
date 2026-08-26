@@ -93,7 +93,7 @@ Checker enforces: CHECK runs under `bash -o errexit -o pipefail -o nounset` (a `
 
 ## 7. What this does not solve
 
-- Deleting `.no-illusory-done/`, rewriting git history, or never loading the skill. Visible in history; not preventable here.
+- Deleting `.no-illusory-done/`, or never loading the skill. Rewriting local history defeats the freeze witness **unless a remote exists**: then the freeze commit must be reachable from a remote ref, and forging that requires a force-push (branch protection is the bound). With no remote, `--report` warns that the witness is local only.
 - A test-writer who omits a requirement from R, or writes a gate that a mutant of the *wrong* file cannot reach. `--mutate` (python only in v1) catches vacuous oracles for changed python; other languages are `inconclusive`.
 - A frozen oracle that reads a file the implementer writes (`test -f x && …`, a JSON flag, product output that is really a pass token). An oracle *must* read the product; a product that is just a pass flag is indistinguishable mechanically. `--red` proves the oracle failed at time zero, not that it fails for the right reason. For changed python, `--mutate` flags such a gate as vacuous (mutants survive); for other languages it is `inconclusive`, and a human must read the ledger.
 - `COVERS` is by id. One gate claiming `R1, R2, R3` while testing R1 passes `--status`; only mutation (python) or a human catches it. A FALSIFIER that is well-formed prose but meaningless passes too — Stage B must refuse to grade it.

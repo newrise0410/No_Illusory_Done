@@ -267,7 +267,7 @@ Gate fields: `CHECK` (run under `bash -o errexit -o pipefail -o nounset` in a cl
 ## 6. What this does not solve
 
 - **An agent that never loads the skill**, or deletes `.no-illusory-done/`. Git history shows it; nothing prevents it.
-- **History rewrite / force-push.** Git HEAD is the freeze witness; an actor who rewrites history defeats it. Branch protection or a human is the bound.
+- **Force-push.** With a remote configured, the freeze commit must be reachable from a remote ref, so a local history rewrite is caught; a force-push to the remote is not. Branch protection or a human is the bound. With no remote at all, the witness is local history only and `--report` says so.
 - **A requirement omitted from R.** Traceability is by id; nothing checks that R1..Rn is the whole request.
 - **A frozen oracle that reads what the implementer writes.** An oracle must read the product; a "product" that is just a pass flag (`test -f sentinel`, `{"pass": true}`) is mechanically indistinguishable from a real one. `--red` cannot tell "no implementation" from "no sentinel". For changed python, `--mutate` flags the gate as vacuous; for other languages it is `inconclusive` and a human must read the ledger.
 - **`COVERS` semantics.** One gate claiming three Rs while testing one passes the id check; `max_gates_per_r` bounds dilution, mutation catches it for python, nothing else does.

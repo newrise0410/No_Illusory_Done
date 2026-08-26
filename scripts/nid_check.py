@@ -434,6 +434,14 @@ def verify_freeze(ctx: Ctx, gates: list[Gate] | None = None, quiet=False) -> boo
             problems.append("FREEZE.sha256 differs from HEAD (re-hash detected)")
         else:
             n = int(git(ctx, "rev-list", "--count", "HEAD", "--", relf).stdout.strip() or 0)
+            # Remote witness: a rewritten local history cannot forge a commit that a remote already holds.
+            fcommit = git(ctx, "log", "-1", "--format=%H", "--", relf).stdout.strip()
+            if git(ctx, "remote").stdout.strip():
+                remote_refs = [r for r in git(ctx, "for-each-ref", "--format=%(refname)", "refs/remotes/").stdout.split() if not r.endswith("/HEAD")]
+                if not any(git(ctx, "merge-base", "--is-ancestor", fcommit, r).returncode == 0 for r in remote_refs):
+                    problems.append(f"freeze commit {fcommit[:8]} is not on any remote ref (push it: a local-only freeze has no witness outside this checkout)")
+            elif not quiet:
+                print("FREEZE WARNING: no git remote — the freeze witness is local history only (rewritable)")
             if n != 1 + len(sup):
                 problems.append(f"FREEZE.sha256 touched by {n} commits but {len(sup)} SUPERSEDE declared (undeclared re-freeze)")
             elif sup:
