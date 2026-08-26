@@ -392,8 +392,17 @@ def run_gate(ctx: Ctx, g: Gate, record=True) -> dict:
                 out, code, to = raw.decode("utf-8", "replace"), proc.returncode, False
             except subprocess.TimeoutExpired:
                 kill_group(proc)
-                raw, _ = proc.communicate()
-                out, code, to = raw.decode("utf-8", "replace") + "\n[NID TIMEOUT: process group killed]", -1, True
+                try:
+                    raw, _ = proc.communicate(timeout=5)
+                    note = "[NID TIMEOUT: process group killed]"
+                except subprocess.TimeoutExpired:
+                    # a detached descendant still holds the pipe: stop reading, do not wait for it
+                    try: proc.stdout.close()
+                    except OSError: pass
+                    try: proc.wait(timeout=5)
+                    except subprocess.TimeoutExpired: pass
+                    raw, note = b"", "[NID TIMEOUT: process group killed; a detached descendant kept the pipe open — output discarded]"
+                out, code, to = raw.decode("utf-8", "replace") + "\n" + note, -1, True
         except OSError as e:
             out, code, to = f"[NID EXEC ERROR] {e}", -1, False
         em = expect_match(g.f["EXPECT"], out)
