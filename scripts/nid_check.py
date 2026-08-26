@@ -214,8 +214,8 @@ def parse_plan(ctx: Ctx):
                     die(f"PLAN.md {hid}: SUBJECT must be an existing regular file inside the repo (not a directory, not a symlink out): {s}")
                 if in_nid(ctx, sp):
                     die(f"PLAN.md {hid}: SUBJECT may not be inside .no-illusory-done")
-                if sp.suffix.lower() in (".md", ".txt", ".rst", ".adoc", ".html", ".log"):
-                    die(f"PLAN.md {hid}: SUBJECT {s} is prose, not the artifact where the property lives; a rewritten claim is not evidence")
+                if sp.suffix.lower() in (".md", ".txt", ".rst", ".adoc", ".html", ".log", ".json", ".yaml", ".yml", ".toml", ".ini", ".csv", ".xml"):
+                    die(f"PLAN.md {hid}: SUBJECT {s} is a prose/data file the implementer can rewrite to say anything; cite code, or a '$ command' that observes behaviour")
             kv["SUBJECTS"] = subjects
             highs[hid] = kv
     if not reqs:
