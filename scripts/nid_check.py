@@ -62,7 +62,7 @@ BAD_CHECK = [
     (re.compile(r"(^|[;&|(]\s*):(\s|$)"), ":"),
     (re.compile(r"\b(sh|bash|zsh|dash)\s+-c\b"), "nested shell"),
     (re.compile(r"\bexit\s+0\b"), "exit 0"),
-    (re.compile(r"passWithNoTests|--no-verify|\|\|\s*true"), "skip/soften flag"),
+    (re.compile(r"passWithNoTests|--no-verify|\|\|"), "skip/soften flag or '||' fallback (a gate must be conjunctive)"),
     (re.compile(r"python[3]?\s+-c\b"), "python -c"),
     (re.compile(r"(^|\s)(touch|cp|mv|rm|tee|sed\s+-i|>>?)\s"), "mutating command in CHECK"),
     (re.compile(r"[$`]|<<|(^|[;&|(]\s*)\w+=\S"), "shell expansion/heredoc/assignment (use a repo-owned script)"),
