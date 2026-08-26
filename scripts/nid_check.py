@@ -394,9 +394,10 @@ def read_freeze(ctx: Ctx):
         if parts[0] == "RED" and len(parts) == 4 and re.fullmatch(r"[0-9a-f]{64}", parts[2]):
             if parts[1] in reds: die(f"FREEZE line {ln}: duplicate RED {parts[1]}")
             reds[parts[1]] = {"sha": parts[2], "exit": int(parts[3])}
-        elif len(parts) == 2 and re.fullmatch(r"[0-9a-f]{64}", parts[0]):
-            if parts[1] in files: die(f"FREEZE line {ln}: duplicate file {parts[1]}")
-            files[parts[1]] = parts[0]
+        elif re.fullmatch(r"[0-9a-f]{64}  .+", line):
+            h, path = line[:64], line[66:]
+            if path in files: die(f"FREEZE line {ln}: duplicate file {path}")
+            files[path] = h
         else:
             die(f"FREEZE line {ln}: malformed: {line!r}")
     if not files: die("FREEZE.sha256 has no file hashes")
