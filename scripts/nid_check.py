@@ -801,10 +801,10 @@ class Mutator(ast.NodeTransformer):
 def changed_files(ctx: Ctx, since: str) -> list[str]:
     """Committed-since-freeze + uncommitted + untracked."""
     def z(*args):
-        return [x for x in git(ctx, "-c", "core.quotePath=false", *args, "-z").stdout.split("\0") if x]
-    out = z("diff", "--name-only", since, "HEAD", "--")
-    out += z("diff", "--name-only", "HEAD", "--")
-    out += z("ls-files", "--others", "--exclude-standard")
+        return [x for x in git(ctx, "-c", "core.quotePath=false", *args).stdout.split("\0") if x]
+    out = z("diff", "--name-only", "-z", since, "HEAD", "--")
+    out += z("diff", "--name-only", "-z", "HEAD", "--")
+    out += z("ls-files", "--others", "--exclude-standard", "-z")
     return sorted(set(out))
 
 
