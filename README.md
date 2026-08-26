@@ -80,7 +80,7 @@ Some outcomes genuinely cannot be a command (game rules hold, UI state is sensib
 H1: no credentials in the diff | FALSIFIER: a string shaped like an API token appears in the diff | SUBJECT: src/auth.ts, $ git diff main --stat
 ```
 
-If the falsifier is a command (contains `$`, `|`, `&&`, `./`, or starts with any executable on `PATH`), the checker refuses: that is a runnable gate, put it in the ledger. `SUBJECT` names the **exact** regular files and **exact** `$ commands` a CI pointer for this H may cite — directories, prefixes, symlinks out of the repo, `/dev/null`, `.no-illusory-done/` are all rejected. Vague phrases are refused.
+If the falsifier is a command (contains `$`, `|`, `&&`, `./`, or starts with any executable on `PATH`), the checker refuses: that is a runnable gate, put it in the ledger. `SUBJECT` names the **exact** regular files and **exact** `$ commands` a CI pointer for this H may cite — directories, prefixes, symlinks out of the repo, `/dev/null`, `.no-illusory-done/`, and prose files (`.md/.txt/.rst/.html`) are all rejected — cite the code or output where the property lives, not a document claiming it. Vague phrases are refused.
 
 ### 3.6 Two-stage CI, with verifiable pointers
 
