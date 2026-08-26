@@ -43,18 +43,19 @@ SELF = Path(__file__).resolve()
 CURRENT_ROOT: Path | None = None
 GATE_RE = re.compile(r"^- \[( |x|X)\] (G\d+):\s*(.+?)\s*$")
 FIELD_RE = re.compile(r"^\s*([A-Z]+):\s*(.*?)\s*$")
-FIELDS = {"CHECK", "EXPECT", "CWD", "TIMEOUT", "RETRIES", "FILES", "KIND", "RED", "EVIDENCE", "COVERS", "ENV"}
+FIELDS = {"CHECK", "EXPECT", "CWD", "TIMEOUT", "FILES", "KIND", "RED", "EVIDENCE", "COVERS", "ENV", "RETRIES"}
 # Files that silently change how test runners / interpreters behave. If one is added or
 # modified after the freeze and is not itself frozen, the oracle is no longer the oracle.
 INFLUENCE = re.compile(r"(^|/)(conftest\.py|sitecustomize\.py|usercustomize\.py|[^/]*\.pth|pytest\.ini|tox\.ini|setup\.cfg|pyproject\.toml|"
                        r"\.env[^/]*|package\.json|jest\.config\.[^/]+|vitest\.config\.[^/]+|babel\.config\.[^/]+|\.babelrc|tsconfig[^/]*\.json|"
                        r"\.npmrc|\.mocharc[^/]*|Makefile|\.bashrc|\.zshrc|\.profile|__init__\.py)$")
 CLEAN_ENV_KEYS = ("PATH", "HOME", "LANG", "LC_ALL", "TMPDIR", "TERM", "USER", "SHELL")
+TOOLCHAIN_KEYS = ("VIRTUAL_ENV", "CARGO_HOME", "RUSTUP_HOME", "GOPATH", "GOROOT", "GOCACHE", "GOMODCACHE", "JAVA_HOME", "NVM_DIR", "PYENV_ROOT", "npm_config_cache")
 # SUBJECT commands whose output does not depend on the change under review.
 CONSTANT_CMD = re.compile(r"^(git\s+(log|rev-parse|rev-list|describe|branch|remote|config|status|tag|show-ref|symbolic-ref)|date|whoami|pwd|uname|hostname|id|ls|wc|cat|head|tail|stat|md5|shasum|sha256sum|python[3]?\s+--version|node\s+-v)\b")
 R_RE = re.compile(r"^(R\d+):\s*(.+?)\s*$")
 H_RE = re.compile(r"^(H\d+):\s*(.+?)\s*$")
-CAP_RE = re.compile(r"^(max_iterations|stall_iters|max_ci_attempts|max_supersedes|max_gates_per_r|max_mutants_per_file):\s*(\d+)\s*$")
+CAP_RE = re.compile(r"^(max_iterations|stall_iters|max_ci_attempts|max_supersedes|max_gates_per_r|max_mutants_per_file|mutation_required):\s*(\d+)\s*$")
 VAGUE = re.compile(r"looks good|covers the feature|works correctly|as expected|properly|correctly", re.I)
 # Tokens in a CHECK that look like paths.
 PATHISH = re.compile(r"(?<![\w-])((?:\.{0,2}/)?[\w.-]+(?:/[\w.-]+)*\.[A-Za-z0-9]{1,8}|(?:\./|\.\./)[\w./-]+)")
@@ -98,6 +99,11 @@ class Ctx:
         self.ledger = ledger.resolve()
         self.nid = self.ledger.parent
         self.root = self.nid.parent
+        if self.nid.name != ".no-illusory-done" or self.ledger.name != "LEDGER.md":
+            die(f"ledger must be <repo>/.no-illusory-done/LEDGER.md (got {self.ledger})")
+        top = subprocess.run(["git", "-C", str(self.root), "rev-parse", "--show-toplevel"], capture_output=True, text=True).stdout.strip()
+        if not top or Path(top).resolve() != self.root:
+            die(f".no-illusory-done must sit at the git toplevel ({top or 'not a git repo'}), not {self.root}")
         self.plan = self.nid / "PLAN.md"
         self.freeze = self.nid / "FREEZE.sha256"
         self.state = self.nid / "STATE.md"
@@ -145,7 +151,9 @@ def parse_plan(ctx: Ctx):
         die("PLAN.md missing")
     sanity_text("PLAN.md", ctx.plan.read_text(encoding="utf-8"))
     reqs, highs, setup = {}, {}, []
-    caps = {"max_iterations": 8, "stall_iters": 3, "max_ci_attempts": 3, "max_supersedes": 1, "max_gates_per_r": 4, "max_mutants_per_file": 0}
+    caps = {"max_iterations": 8, "stall_iters": 3, "max_ci_attempts": 3, "max_supersedes": 1, "max_gates_per_r": 4, "max_mutants_per_file": 0, "mutation_required": 1}
+    expected_new: list[str] = []
+    product: list[str] = []
     for ln, raw in enumerate(ctx.plan.read_text(encoding="utf-8").replace("\r", "").splitlines(), 1):
         line = raw.strip().lstrip("-* ").strip()
         m = CAP_RE.match(line)
@@ -153,6 +161,20 @@ def parse_plan(ctx: Ctx):
             caps[m.group(1)] = int(m.group(2)); continue
         if line.startswith("SETUP:"):
             setup.append(line[6:].strip()); continue
+        if line.startswith("PRODUCT:"):
+            for x in line[8:].split(","):
+                x = x.strip().rstrip("/")
+                if not x: continue
+                if x in (".", "") or x.startswith(".no-illusory-done") or x.startswith("scripts/nid_check"):
+                    die(f"PLAN.md PRODUCT may not be the repo root or the checker/ledger dir: {x}")
+                product.append(x)
+            continue
+        if line.startswith("EXPECTED_NEW:"):
+            for x in line[13:].split(","):
+                x = x.strip()
+                if x:
+                    expected_new.append(x)
+            continue
         m = R_RE.match(line)
         if m:
             if m.group(1) in reqs: die(f"PLAN.md duplicate {m.group(1)} (line {ln})")
@@ -192,6 +214,10 @@ def parse_plan(ctx: Ctx):
             highs[hid] = kv
     if not reqs:
         die("PLAN.md has no R1.. requirement clauses")
+    caps["_expected_new"] = expected_new
+    caps["_product"] = product
+    if not product:
+        die("PLAN.md must declare PRODUCT: <paths the implementation may change> (frozen)")
     return reqs, highs, setup, caps
 
 
@@ -211,6 +237,8 @@ def sanity_text(name: str, text: str) -> None:
         fm = FIELD_RE.match(line)
         if fm and fm.group(1) in FIELDS:
             continue
+        if re.match(r"^\s*-\s*\[.?\]", line) and not GATE_RE.match(line):
+            die(f"{name} line {ln}: looks like a gate but is not exactly '- [ ] Gn: title': {line.strip()!r}")
         if LOOKALIKE_ID.match(line) and not (R_RE.match(line.strip().lstrip("-* ").strip()) or H_RE.match(line.strip().lstrip("-* ").strip()) or GATE_RE.match(line)):
             die(f"{name} line {ln}: looks like an id but is not a valid R/H/G line: {line.strip()!r}")
 
@@ -236,7 +264,7 @@ def falsifier_is_command(f: str) -> bool:
     if re.search(r"[$|`]|&&|\.\/|^-|\s-[a-zA-Z]\b", f):
         return True
     first = f.split()[0] if f.split() else ""
-    return bool(shutil.which(first)) and len(f.split()) > 1
+    return bool(shutil.which(first))
 
 
 def parse_ledger(ctx: Ctx) -> list[Gate]:
@@ -275,18 +303,22 @@ def parse_ledger(ctx: Ctx) -> list[Gate]:
                 rx = re.compile(lit)
             except re.error as e:
                 die(f"{g.id}: EXPECT regex invalid: {e}")
-            for probe in ("", "FAIL", "error", "x", "NOT THE REQUEST", "Traceback"):
+            for probe in ("", "FAIL", "error", "x", "NOT THE REQUEST", "Traceback", "Error: something went wrong here", "0", "false"):
                 if rx.fullmatch(probe): die(f"{g.id}: EXPECT regex is vacuous (matches {probe!r})")
+            literal = re.sub(r"\\.|[\^$.*+?()\[\]{}|]|\d+,?\d*", "", lit)
+            if len(re.sub(r"[^A-Za-z0-9_-]", "", literal)) < 3:
+                die(f"{g.id}: EXPECT regex has no meaningful literal (needs ≥3 literal alphanumerics, e.g. /NID G\\d+/)")
         if len(lit.strip()) < 3: die(f"{g.id}: EXPECT too short to be a success marker")
         for kv in g.env:
             if not re.fullmatch(r"[A-Z_][A-Z0-9_]*=[^\s$`]*", kv) or kv.split("=")[0] in ("PATH", "PYTHONPATH", "NODE_PATH", "LD_PRELOAD", "DYLD_INSERT_LIBRARIES", "PYTHONSTARTUP", "BASH_ENV", "ENV"):
                 die(f"{g.id}: ENV entry not allowed: {kv!r} (literal KEY=value only; no PATH/PYTHONPATH/NODE_PATH/LD_PRELOAD)")
         if g.f.get("RED", "required") not in ("required", "pass-ok"): die(f"{g.id}: bad RED value")
+        if "RETRIES" in g.f: die(f"{g.id}: RETRIES is not supported — a flaky oracle is not an oracle; fix the test")
         try:
-            t, r = int(g.f.get("TIMEOUT", "300")), int(g.f.get("RETRIES", "0"))
+            t = int(g.f.get("TIMEOUT", "300"))
         except ValueError:
-            die(f"{g.id}: TIMEOUT/RETRIES must be integers")
-        if t <= 0 or not 0 <= r <= 2: die(f"{g.id}: TIMEOUT >0, RETRIES 0..2")
+            die(f"{g.id}: TIMEOUT must be an integer")
+        if t <= 0: die(f"{g.id}: TIMEOUT >0")
         cwd = ctx.root / g.f.get("CWD", ".")
         if not cwd.is_dir() or ctx.rel(cwd).startswith(".."): die(f"{g.id}: CWD not a dir inside repo")
         # Every existing file the CHECK names must be frozen (FILES). A path that does not
@@ -299,7 +331,7 @@ def parse_ledger(ctx: Ctx) -> list[Gate]:
             words = [w for w in lex if w not in ("&&", "||", "|", ";", "(", ")", "<", ">", "&")]
         except ValueError as e:
             die(f"{g.id}: CHECK is not parseable as shell words ({e})")
-        toks = set(PATHISH.findall(chk)) | set(words)
+        toks = set(words)
         for tok in toks:
             if not tok or tok == "--": continue
             p = cwd / tok
@@ -322,9 +354,11 @@ def parse_ledger(ctx: Ctx) -> list[Gate]:
     for g in gates:
         for r in g.covers:
             if r not in reqs: die(f"{g.id}: COVERS unknown requirement {r}")
-        covered.update(g.covers)
+        if g.kind == "cmd": covered.update(g.covers)
+    n_cmd, n_judge = sum(g.kind == "cmd" for g in gates), sum(g.kind == "llm-judge" for g in gates)
+    if n_judge > n_cmd: die(f"{n_judge} llm-judge gates vs {n_cmd} runnable gates: judgment may not outnumber observation")
     missing = sorted(set(reqs) - covered, key=lambda x: int(x[1:]))
-    if missing: die(f"requirements with no gate: {','.join(missing)}")
+    if missing: die(f"requirements with no RUNNABLE gate (llm-judge coverage does not count): {','.join(missing)}")
     _, _, _, caps = parse_plan(ctx)
     for r in reqs:
         n = sum(1 for g in gates if r in g.covers)
@@ -337,7 +371,7 @@ def parse_ledger(ctx: Ctx) -> list[Gate]:
 # --------------------------------------------------------------------------
 def run_gate(ctx: Ctx, g: Gate, record=True) -> dict:
     cwd = (ctx.root / g.f.get("CWD", ".")).resolve()
-    timeout, retries = int(g.f.get("TIMEOUT", "300")), int(g.f.get("RETRIES", "0"))
+    timeout, retries = int(g.f.get("TIMEOUT", "300")), 0
     attempts = []
     for attempt in range(retries + 1):
         t0 = time.time()
@@ -391,7 +425,12 @@ def clean_env(g: Gate | None = None) -> dict:
         if CURRENT_ROOT is not None and (rd == str(CURRENT_ROOT) or rd.startswith(str(CURRENT_ROOT) + os.sep)): continue
         safe.append(d)
     env["PATH"] = os.pathsep.join(safe) or "/usr/bin:/bin"
-    env.update({"PYTHONNOUSERSITE": "1", "PYTHONDONTWRITEBYTECODE": "1",
+    for k in TOOLCHAIN_KEYS:  # toolchain homes are allowed only when they live outside the repo
+        v = os.environ.get(k)
+        if v and os.path.isabs(v) and not (CURRENT_ROOT and os.path.realpath(v).startswith(str(CURRENT_ROOT) + os.sep)):
+            env[k] = v
+    env.update({"PYTHONNOUSERSITE": "1", "PYTHONDONTWRITEBYTECODE": "1", "NPM_CONFIG_USERCONFIG": "/dev/null",
+                "PIP_CONFIG_FILE": "/dev/null", "GIT_CONFIG_GLOBAL": "/dev/null", "GIT_CONFIG_NOSYSTEM": "1",
                 "NODE_OPTIONS": "", "CI": "1", "NID": "1"})
     if g is not None:
         for kv in g.env:
@@ -399,13 +438,30 @@ def clean_env(g: Gate | None = None) -> dict:
     return env
 
 
+def under(path: str, prefixes: list[str]) -> bool:
+    return any(path == p or path.startswith(p + "/") for p in prefixes)
+
+
 def influence_check(ctx: Ctx, gates: list[Gate]) -> None:
-    """Refuse if a runner/interpreter-influencing file was added or changed since the freeze and is not frozen."""
+    """The implementer may change only PRODUCT paths (+EXPECTED_NEW). Anything else changed since the freeze
+    — a loader hook, a symlink, a bin/, a runner config — means the oracle is no longer the oracle."""
     frozen = set(read_freeze(ctx)[0])
+    caps = parse_plan(ctx)[3]
+    expected, product = set(caps["_expected_new"]), caps["_product"]
     fcommit = git(ctx, "log", "-1", "--format=%H", "--", ctx.rel(ctx.freeze)).stdout.strip()
-    bad = [f for f in changed_files(ctx, fcommit) if INFLUENCE.search(f) and f not in frozen]
+    if git(ctx, "ls-files", "--stage").stdout.count("160000 ") or any(x.endswith("/") for x in git(ctx, "-c", "core.quotePath=false", "ls-files", "--others", "--exclude-standard", "--directory", "-z").stdout.split("\0") if x and (ctx.root / x / ".git").exists()):
+        die("submodules / nested git repositories are not supported (changes inside them are invisible to the freeze)")
+    changed = changed_files(ctx, fcommit)
+    out_of_scope = [f for f in changed if not under(f, product) and f not in expected and not f.startswith(".no-illusory-done/")]
+    if out_of_scope:
+        die(f"files changed since the freeze outside PRODUCT {product}: {', '.join(out_of_scope[:10])} -> only the product may change (HANDOFF if the plan is wrong)")
+    for f in changed:
+        p = ctx.root / f
+        if p.is_symlink() and not inside_repo(ctx, p):
+            die(f"symlink {f} added since the freeze points outside the repo")
+    bad = [f for f in changed if INFLUENCE.search(f) and f not in frozen and f not in expected]
     if bad:
-        die(f"runner-influencing files changed since the freeze and are not frozen: {', '.join(bad)} -> the oracle is no longer the oracle")
+        die(f"runner-influencing files changed since the freeze and are not frozen or EXPECTED_NEW: {', '.join(bad)}")
 
 
 def run_all(ctx: Ctx, gates: list[Gate], record=True) -> dict[str, dict]:
@@ -450,7 +506,7 @@ GIT_ENV = {**{k: os.environ[k] for k in ("PATH", "HOME", "LANG", "LC_ALL", "TMPD
 
 def git(ctx: Ctx, *args) -> subprocess.CompletedProcess:
     """All git reads ignore replacement objects, aliases, and inherited env; hooks are not invoked by reads."""
-    return subprocess.run(["git", "--no-replace-objects", "-C", str(ctx.root), *args], capture_output=True, text=True, env=GIT_ENV)
+    return subprocess.run(["git", "--no-replace-objects", "-c", "core.hooksPath=/dev/null", "-C", str(ctx.root), *args], capture_output=True, text=True, env=GIT_ENV)
 
 
 def verify_freeze(ctx: Ctx, gates: list[Gate] | None = None, quiet=False) -> bool:
@@ -488,10 +544,16 @@ def verify_freeze(ctx: Ctx, gates: list[Gate] | None = None, quiet=False) -> boo
             n = int(git(ctx, "rev-list", "--count", "HEAD", "--", relf).stdout.strip() or 0)
             # Remote witness: a rewritten local history cannot forge a commit that a remote already holds.
             fcommit = git(ctx, "log", "-1", "--format=%H", "--", relf).stdout.strip()
-            if git(ctx, "remote").stdout.strip():
-                remote_refs = [r for r in git(ctx, "for-each-ref", "--format=%(refname)", "refs/remotes/").stdout.split() if not r.endswith("/HEAD")]
-                if not any(git(ctx, "merge-base", "--is-ancestor", fcommit, r).returncode == 0 for r in remote_refs):
-                    problems.append(f"freeze commit {fcommit[:8]} is not on any remote ref (push it: a local-only freeze has no witness outside this checkout)")
+            remotes = git(ctx, "remote").stdout.split()
+            if remotes:
+                tips = []
+                for rname in remotes:
+                    lr = git(ctx, "ls-remote", "--heads", "--tags", rname)
+                    if lr.returncode != 0:
+                        problems.append(f"cannot query remote {rname} (offline?) — remote witness unavailable, fail closed"); continue
+                    tips += [ln.split()[0] for ln in lr.stdout.splitlines() if ln.strip()]
+                if not any(git(ctx, "merge-base", "--is-ancestor", fcommit, t).returncode == 0 for t in tips):
+                    problems.append(f"freeze commit {fcommit[:8]} is not reachable from any ref actually on the remote (push it)")
             elif not quiet:
                 print("FREEZE WARNING: no git remote — the freeze witness is local history only (rewritable)")
             if n != 1 + len(sup):
@@ -510,6 +572,8 @@ def verify_freeze(ctx: Ctx, gates: list[Gate] | None = None, quiet=False) -> boo
 
 def cmd_red(ctx: Ctx, supersede: str | None = None) -> None:
     gates = parse_ledger(ctx)
+    for x in parse_plan(ctx)[3]["_expected_new"]:
+        if (ctx.root / x).exists(): die(f"PLAN.md EXPECTED_NEW {x} already exists at freeze time (declare only files the implementation will create)")
     sup = []
     if ctx.freeze.exists():
         if not supersede or len(supersede.strip()) < 12:
@@ -588,10 +652,23 @@ def ref_counter(ctx: Ctx, name: str) -> int:
         die(f"refs/nid/{name} is malformed")
 
 
-def set_ref_counter(ctx: Ctx, name: str, value: int) -> None:
-    h = subprocess.run(["git", "--no-replace-objects", "-C", str(ctx.root), "hash-object", "-w", "--stdin"], input=str(value),
+def ref_blob(ctx: Ctx, name: str) -> str:
+    r = git(ctx, "rev-parse", "--verify", "-q", f"refs/nid/{name}")
+    return git(ctx, "cat-file", "-p", r.stdout.strip()).stdout if r.returncode == 0 else ""
+
+
+def set_ref_blob(ctx: Ctx, name: str, content: str) -> None:
+    """Compare-and-swap so concurrent worktrees cannot lose updates."""
+    old = git(ctx, "rev-parse", "--verify", "-q", f"refs/nid/{name}").stdout.strip()
+    h = subprocess.run(["git", "--no-replace-objects", "-C", str(ctx.root), "hash-object", "-w", "--stdin"], input=content,
                        capture_output=True, text=True, env=GIT_ENV).stdout.strip()
-    git(ctx, "update-ref", f"refs/nid/{name}", h)
+    args = ["update-ref", f"refs/nid/{name}", h] + ([old] if old else [])
+    if git(ctx, *args).returncode != 0:
+        die(f"refs/nid/{name} changed concurrently (another --run in a linked worktree?) — rerun")
+
+
+def set_ref_counter(ctx: Ctx, name: str, value: int) -> None:
+    set_ref_blob(ctx, name, str(value))
 
 
 def stage_a(ctx: Ctx, gates: list[Gate], record=True) -> tuple[bool, dict, list[str]]:
@@ -620,12 +697,13 @@ def cmd_run(ctx: Ctx, hook=False) -> None:
     for gid, r in results.items():
         print(f"{gid}: {'PASS' if r['pass'] else 'FAIL'} exit={r['exit']} expect={r['expect_match']} "
               f"sha={r['sha256'][:12]} bytes={r['bytes']}{' (flaky)' if r['flaky'] else ''}")
-    prev_e = {k: v["E"] for k, v in old.items() if k in results}
     new_e = {k: ("Satisfied" if r["pass"] else "Refuted") for k, r in results.items()}
-    stall = 0 if ok else (stall + 1 if prev_e == new_e else 0)
+    prev_vec = ref_blob(ctx, "evector").strip()
+    new_vec = ",".join(f"{k}={v}" for k, v in sorted(new_e.items()))
+    stall = 0 if ok else (stall + 1 if prev_vec == new_vec else 0)
     it += 1
     write_state(ctx, gates, results, it, stall, old)
-    set_ref_counter(ctx, "iteration", it); set_ref_counter(ctx, "stall", stall)
+    set_ref_counter(ctx, "iteration", it); set_ref_counter(ctx, "stall", stall); set_ref_blob(ctx, "evector", new_vec)
     judge = [g.id for g in gates if g.kind == "llm-judge"]
     if not ok:
         print(f"UNMET: {','.join(unmet)}")
@@ -740,7 +818,9 @@ def ci_verdict(ctx: Ctx) -> tuple[str, list[str]]:
     verdicts, problems = check_ci_pointers(ctx, highs, judge)
     if flaky_ids(results): problems.append(f"flaky gates passed only on retry: {','.join(flaky_ids(results))} (process fail)")
     mut = mutation_verdict(ctx, gates)
+    _, _, _, caps = parse_plan(ctx)
     if mut["status"] == "fail": problems.append(f"VACUOUS ORACLE: {len(mut['survivors'])} mutants survived: " + "; ".join(mut["survivors"][:5]))
+    mutation_inconclusive = mut["status"] == "inconclusive" and caps["mutation_required"]
     failed = [k for k in list(highs) + judge if verdicts.get(k) != "pass"]
     if v["CI"] != "merge-ok":
         return v["CI"], [f"mutation: {mut['status']}"] if mut["status"] != "pass" else []
@@ -752,7 +832,10 @@ def ci_verdict(ctx: Ctx) -> tuple[str, list[str]]:
     if v["STAGE_B"] == "skipped" and (highs or judge): problems.append("Stage B skipped but H/llm-judge criteria exist")
     if v["UNMET"].strip().lower() not in ("none", "", "-"): problems.append(f"UNMET non-empty: {v['UNMET']}")
     if failed: problems.append(f"criteria without verified pass: {','.join(failed)}")
-    return ("reject" if problems else "merge-ok"), problems
+    if problems: return "reject", problems
+    if mutation_inconclusive:
+        return "inconclusive", [f"mutation inconclusive ({mut['note']}); set mutation_required: 0 in PLAN.md (frozen) to accept non-python changes without mutation"]
+    return "merge-ok", []
 
 
 def cmd_ci(ctx: Ctx) -> None:
@@ -922,12 +1005,12 @@ def cmd_report(ctx: Ctx) -> None:
     print(f"STAGE_A: {'pass' if a_ok else 'fail'}  (re-run in this invocation)")
     print(f"CI: {ci}")
     print(f"UNMET: {','.join(unmet) if unmet else 'none'}")
-    print(f"FREEZE: {'match' if fz else 'mismatch'}")
+    print(f"FREEZE: {'match' if fz else 'mismatch'}" + ("" if git(ctx, "remote").stdout.strip() else "  (no remote: witness is local history only)"))
     print(f"FLAKY: {','.join(flaky_ids(results)) or 'none'}")
     mv = mutation_verdict(ctx, gates) if (fz and a_ok) else {"status": "not-run", "survivors": [], "note": ""}
     print(f"MUTATION: {mv['status']}" + (f" ({len(mv['survivors'])} survived)" if mv['survivors'] else "") + (f" — {mv['note']}" if mv.get('note') else ""))
     print(f"ITER: {it}")
-    print("EVIDENCE: " + ("; ".join(f"{k} → exit {r['exit']}, expect {r['expect_match']}, {r['sha256'][:12]}" for k, r in results.items()) or "none"))
+    print("EVIDENCE: " + ("; ".join(f"{k} → exit {r['exit']}{' TIMEOUT' if r['attempts'][-1]['timeout'] else ''}, expect {r['expect_match']}, {r['sha256'][:12]}" for k, r in results.items()) or "none"))
     for p in problems: print(f"CI PROBLEM: {p}")
     print(f"CI.md: {ctx.rel(ctx.ci) if ci != 'not-run' else 'missing'}")
     sys.exit(0 if verdict == "merge-ok" else 1)
@@ -951,7 +1034,9 @@ def main() -> None:
         elif a.run: cmd_run(Ctx(Path(a.run)))
         elif a.mutate: cmd_mutate(Ctx(Path(a.mutate)))
         elif a.ci:
-            p = Path(a.ci).resolve(); cmd_ci(Ctx(p.parent / "LEDGER.md"))
+            p = Path(a.ci).resolve()
+            if p.name != "CI.md": die("--ci expects <repo>/.no-illusory-done/CI.md")
+            cmd_ci(Ctx(p.parent / "LEDGER.md"))
         elif a.verify_freeze:
             ctx = Ctx(None); sys.exit(0 if verify_freeze(ctx, parse_ledger(ctx)) else 1)
         elif a.report: cmd_report(Ctx(None))

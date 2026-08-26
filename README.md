@@ -60,9 +60,10 @@ Before any implementation, the test-writer runs every gate. **Each must fail.** 
 - refuses if any hashed file differs — checked **before and after** running the gates, so a CHECK that rewrites a frozen file mid-run is caught;
 - refuses if `FREEZE.sha256` differs from `git HEAD`, or if more commits touched it than the `SUPERSEDE` lines it declares — a re-freeze must be declared with `--red --supersede "<reason>"` and stays in the file forever;
 - refuses outside a git repository (no witness → no verdict);
-- refuses if a CHECK names an existing file that is not in `FILES` (a path that does not exist yet is product output); `FILES` must be non-empty and inside the repo;
-- runs every CHECK in a clean environment (PATH/HOME/LANG/TMPDIR only, `PYTHONNOUSERSITE=1`; a gate's `ENV:` adds frozen literals, never PATH/PYTHONPATH/NODE_PATH/LD_PRELOAD), so nothing inherited from the implementer's shell reaches the oracle;
-- refuses `--run` if a runner-influencing file (`conftest.py`, `sitecustomize.py`, `*.pth`, `pytest.ini`, `pyproject.toml`, `package.json`, jest/vitest/babel config, `tsconfig`, `.env`, `Makefile`, `__init__.py`, …) was added or changed since the freeze without being frozen;
+- refuses if a CHECK names an existing file that is not in `FILES` (a path that does not exist yet is product output); `FILES` must be non-empty and inside the repo; the ledger must be `<git toplevel>/.no-illusory-done/LEDGER.md` (no alternate ledgers); submodules and nested repos are refused;
+- refuses if any file **outside `PRODUCT:`** (declared in the frozen `PLAN.md`) changed since the freeze — a loader hook, a post-freeze symlink, a `bin/`, a test helper — the implementer may write only the product (`EXPECTED_NEW:` for product files that carry a runner-config name);
+- runs every CHECK in a clean environment: PATH with relative and repo-internal entries removed, HOME/LANG/TMPDIR, toolchain homes only when outside the repo, `PYTHONNOUSERSITE=1`, npm/pip/git user config at `/dev/null`; a gate's `ENV:` adds frozen literals, never PATH/PYTHONPATH/NODE_PATH/LD_PRELOAD. "Clean" means *the implementer's shell cannot reach the oracle*, not hermetic — a toolchain inside the checkout will not be found;
+- refuses `--run` if a runner-influencing file (`conftest.py`, `sitecustomize.py`, `*.pth`, `pytest.ini`, `pyproject.toml`, `package.json`, jest/vitest/babel config, `tsconfig`, `.env`, `Makefile`, `__init__.py`, …) was added or changed since the freeze without being frozen or declared in `PLAN.md` `EXPECTED_NEW:`;
 - refuses more than `max_supersedes` declared re-freezes (default 1).
 
 What git cannot witness — history rewrite, force-push — is outside the checker.
@@ -105,7 +106,7 @@ H3: fail tier badge missing on /pricing
 
 ### 3.9 Mutation (`--mutate`)
 
-`--red` proves an oracle fails without the code; `--mutate` proves it fails with *slightly wrong* code. For every python source file changed since the freeze, the checker generates AST mutants (comparison/arithmetic/boolean operator swaps, constant shifts, `if` negation, `return → return None`), applies each in a throwaway git worktree, and re-runs all gates. All mutants run (an optional `max_mutants_per_file` cap makes the result `inconclusive`, never `pass`). A mutant no gate kills is printed as `VACUOUS ORACLE` and the command fails. Zero mutants (no changed python, or python with nothing to mutate) is `inconclusive` — exit 1, shown in `--report`, not silently a pass. v1 is python-only.
+`--red` proves an oracle fails without the code; `--mutate` proves it fails with *slightly wrong* code. For every python source file changed since the freeze, the checker generates AST mutants (comparison/arithmetic/boolean operator swaps, constant shifts, `if` negation, `return → return None`), applies each in a throwaway git worktree, and re-runs all gates. All mutants run (an optional `max_mutants_per_file` cap makes the result `inconclusive`, never `pass`). In `--ci`, an inconclusive mutation yields `CI: inconclusive` unless the frozen `PLAN.md` sets `mutation_required: 0`. A mutant no gate kills is printed as `VACUOUS ORACLE` and the command fails. Zero mutants (no changed python, or python with nothing to mutate) is `inconclusive` — exit 1, shown in `--report`, not silently a pass. v1 is python-only.
 
 ## 4. Roles
 
@@ -157,6 +158,7 @@ Any of: the change touches ≥3 files; a new test is needed; the user gave a goa
 R1: /pricing renders exactly three tiers
 R2: annual toggle shows 20% discount to two decimals
 R3: no new secrets in the diff
+PRODUCT: src
 
 H1: tier order matches marketing spec (Basic, Pro, Team) | FALSIFIER: any other order or a fourth card is visible on /pricing | SUBJECT: src/pages/pricing.tsx
 max_supersedes: 1
@@ -250,7 +252,7 @@ python3 scripts/nid_check.py --report                       # paste verbatim; "d
 | `--report` | re-run Stage A + CI validation; print verdict | `VERDICT: merge-ok` |
 | `--hook` | Stop-hook entry (no ledger → exit 0; else `--run`) | ALL MET |
 
-Gate fields: `CHECK` (run under `bash -o errexit -o pipefail -o nounset` in a clean env), `EXPECT` (literal ≥3 chars or a non-vacuous `/regex/`, **last non-empty line** of stdout+stderr), `CWD`, `TIMEOUT` (300 s), `RETRIES` (0–2; pass-on-retry = process fail in CI), `FILES` (frozen, non-empty), `ENV` (frozen literal `KEY=value` list), `KIND` (`cmd` | `llm-judge`), `RED` (`required` | `pass-ok`), `COVERS`.
+Gate fields: `CHECK` (run under `bash -o errexit -o pipefail -o nounset` in a clean env), `EXPECT` (literal ≥3 chars or a `/regex/` with ≥3 literal alphanumerics that matches none of the failure probes, **last non-empty line** of stdout+stderr), `CWD`, `TIMEOUT` (300 s), `FILES` (frozen, non-empty), `ENV` (frozen literal `KEY=value` list), `KIND` (`cmd` | `llm-judge`; judges may not outnumber runnable gates), `RED` (`required` | `pass-ok`), `COVERS` (every R needs a runnable gate). No `RETRIES`: a flaky oracle is refused.
 
 ### 5.5 Artifacts
 
@@ -267,8 +269,9 @@ Gate fields: `CHECK` (run under `bash -o errexit -o pipefail -o nounset` in a cl
 ## 6. What this does not solve
 
 - **An agent that never loads the skill**, or deletes `.no-illusory-done/`. Git history shows it; nothing prevents it.
-- **Force-push.** With a remote configured, the freeze commit must be reachable from a remote ref, so a local history rewrite is caught; a force-push to the remote is not. Branch protection or a human is the bound. With no remote at all, the witness is local history only and `--report` says so.
+- **Force-push.** With a remote configured, the freeze commit must be reachable from a ref the remote *actually* reports (`git ls-remote`, not local tracking refs), so a local history rewrite, a forged tracking ref, or an unpushed freeze is caught; a force-push to the remote is not. Branch protection or a human is the bound. With no remote at all, the witness is local history only and `--report` says so.
 - **A requirement omitted from R.** Traceability is by id; nothing checks that R1..Rn is the whole request.
+- **A product that decoys.** An implementation that reads its own config to pick a module returning the expected value satisfies the oracle observably; a stateful oracle that passes on its Nth call is a sentinel variant. Mutation (python) or a human tells a real implementation from a decoy.
 - **A frozen oracle that reads what the implementer writes.** An oracle must read the product; a "product" that is just a pass flag (`test -f sentinel`, `{"pass": true}`) is mechanically indistinguishable from a real one. `--red` cannot tell "no implementation" from "no sentinel". For changed python, `--mutate` flags the gate as vacuous; for other languages it is `inconclusive` and a human must read the ledger.
 - **`COVERS` semantics.** One gate claiming three Rs while testing one passes the id check; `max_gates_per_r` bounds dilution, mutation catches it for python, nothing else does.
 - **Caps are advisory against an adversary.** Counters live in `STATE.md` and git refs (`refs/nid/*`, the larger wins); `git update-ref -d` resets them. They stop accidental loops, not deliberate ones.

@@ -41,12 +41,16 @@ scripts/nid_check.py                                                        — 
 R1: /pricing renders exactly three tier cards
 R2: annual toggle shows a 20.00% discount
 H1: tier order matches marketing spec | FALSIFIER: any order other than Basic, Pro, Team is visible | SUBJECT: src/pages/pricing.tsx, $ npx playwright test tiers
+PRODUCT: src, public          # the ONLY paths the implementer may change; anything else changed since the freeze is refused
 SETUP: npm ci
 max_iterations: 8        stall_iters: 3
 max_supersedes: 1        max_gates_per_r: 4        max_mutants_per_file: 0   # 0 = run all; a cap makes mutation inconclusive, never pass
+mutation_required: 1     # 1: inconclusive mutation → CI inconclusive; 0: accept (non-python projects) — decided at freeze time
+EXPECTED_NEW: package.json, src/__init__.py   # product files the implementation will create that the influence guard would otherwise refuse
 ```
 
-- `R1..Rn` — atomic clauses of the **current** request. Every gate lists the Rs it observes (`COVERS:`); every R must be covered. Checked by id only — this catches omitted requirements, not lying gates.
+- `PRODUCT` — the paths the implementation may write. `--run` refuses if any other file changed since the freeze (a loader hook in `tests/`, a symlink at the root, a `bin/`, a runner config). Product files that must be *created* under a runner-config name (`package.json`, `__init__.py`) go in `EXPECTED_NEW:`.
+- `R1..Rn` — atomic clauses of the **current** request. Every gate lists the Rs it observes (`COVERS:`); every R must be covered by a **runnable** gate (llm-judge coverage does not count), and llm-judge gates may not outnumber runnable ones. Checked by id only — this catches omitted requirements, not lying gates.
 - `H1..Hn` — outcomes no command can observe. `FALSIFIER` names the observation that would make it false; if it *is* a command (contains `$ | && ./`, or starts with any executable on PATH) it is refused — put it in the ledger. `SUBJECT` lists the **exact regular files** and/or **exact `$ commands`** a CI pointer may cite for this H — no directories, no prefixes, no symlinks out of the repo. Anything else is rejected.
 - Vague words (looks good, correctly, properly, as expected) are refused in R and H lines.
 
@@ -59,11 +63,11 @@ max_supersedes: 1        max_gates_per_r: 4        max_mutants_per_file: 0   # 0
   FILES: tests/pricing.spec.ts, tests/nid/G1.marker       # frozen; at least one required
   ENV: PRICING_MODE=test                                  # optional literal env; frozen with the ledger
   COVERS: R1
-  CWD: .        TIMEOUT: 300        RETRIES: 0            # RETRIES 0..2; pass-on-retry flagged flaky
+  CWD: .        TIMEOUT: 300                              # no RETRIES: a flaky oracle is not an oracle
   KIND: cmd     RED: required                             # llm-judge → no CHECK; pass-ok → regression gate only
 ```
 
-Checker enforces: CHECK runs under `bash -o errexit -o pipefail -o nounset` (a `;`-masked failure fails); forbidden: `echo printf true false : command eval exec source env xargs nohup nice time sh -c exit 0 passWithNoTests || true python -c touch cp mv rm tee sed -i >` and any `$`, backtick, heredoc or `VAR=` (use a repo-owned script); CHECK may not contain EXPECT; **every existing file a CHECK names must be in FILES** (a path that does not exist yet is product output), FILES non-empty, all inside the repo, no symlinks out; EXPECT regexes that match `""`/`FAIL`/arbitrary text are refused; CHECK runs in a **clean environment** (PATH/HOME/LANG/TMPDIR only, `PYTHONNOUSERSITE=1`; `ENV:` may add literal values but never PATH/PYTHONPATH/NODE_PATH/LD_PRELOAD); `--run` refuses if a **runner-influencing file** (conftest.py, sitecustomize.py, *.pth, pytest.ini, pyproject.toml, package.json, jest/vitest/babel config, tsconfig, .env, Makefile, __init__.py…) was added or changed since the freeze without being frozen; no two gates with identical CHECK; at most `max_gates_per_r` gates per R; `RED: pass-ok` only for gates whose FILES were committed at HEAD before the freeze and that pass at `--red`; at least one `RED: required` gate.
+Checker enforces: CHECK runs under `bash -o errexit -o pipefail -o nounset` (a `;`-masked failure fails); forbidden: `echo printf true false : command eval exec source env xargs nohup nice time sh -c exit 0 passWithNoTests || true python -c touch cp mv rm tee sed -i >` and any `$`, backtick, heredoc or `VAR=` (use a repo-owned script); CHECK may not contain EXPECT; **every existing file a CHECK names must be in FILES** (a path that does not exist yet is product output), FILES non-empty, all inside the repo, no symlinks out; EXPECT regexes that match `""`/`FAIL`/arbitrary text are refused; CHECK runs in a **clean environment** (PATH/HOME/LANG/TMPDIR only, `PYTHONNOUSERSITE=1`; `ENV:` may add literal values but never PATH/PYTHONPATH/NODE_PATH/LD_PRELOAD); `--run` refuses if a **runner-influencing file** (conftest.py, sitecustomize.py, *.pth, pytest.ini, pyproject.toml, package.json, jest/vitest/babel config, tsconfig, .env, Makefile, __init__.py…) was added or changed since the freeze without being frozen or declared in `EXPECTED_NEW:`; no two gates with identical CHECK; at most `max_gates_per_r` gates per R; `RED: pass-ok` only for gates whose FILES were committed at HEAD before the freeze and that pass at `--red`; at least one `RED: required` gate.
 
 ## 4. Roles
 
@@ -73,7 +77,7 @@ Checker enforces: CHECK runs under `bash -o errexit -o pipefail -o nounset` (a `
 
 **LLM CI** — new worktree, empty conversation, forbidden inputs: implementer chat, PR summary, checkboxes, `STATE.md`.
 - Stage A: `SETUP`, then `--run`. Fail → `CI: reject`, stop.
-- `--mutate` (python v1): AST mutants of every source file changed since the freeze; each must be killed by some gate. Survivors → `VACUOUS ORACLE`; zero mutants or no python → `inconclusive` (exit 1, printed in `--report`, not a reject by itself). `--ci` runs this internally; survivors reject.
+- `--mutate` (python v1): AST mutants of every source file changed since the freeze; each must be killed by some gate. Survivors → `VACUOUS ORACLE` → reject. Zero mutants or no python → `inconclusive`; `--ci` then returns `CI: inconclusive` (not merge-ok) unless the frozen PLAN says `mutation_required: 0`.
 - Stage B: grade only H lines and `llm-judge` gates, each against its FALSIFIER, citing a pointer within its SUBJECT:
   `H1: pass @ src/pages/pricing.tsx:22-40 sha=<≥12 hex of those lines>` or `H1: pass $ npx playwright test tiers sha=<≥12 hex of output>`. `--ci` rehashes / reruns; a pointer outside SUBJECT, outside the repo, with a wrong hash, no output, or non-zero exit downgrades the pass to fail.
 - Write `CI.md` (`CI / STAGE_A / STAGE_B / PROCESS / OUTCOME / UNMET / EVIDENCE:` + one verdict line per H/llm-judge id), then `--ci`. `--ci` re-runs Stage A and mutation itself; it never reads a prior run's record. A gate that passed only on retry is a process failure → reject.
@@ -86,6 +90,8 @@ Checker enforces: CHECK runs under `bash -o errexit -o pipefail -o nounset` (a `
 ```
 
 `--hook` exits 0 when no ledger exists, otherwise behaves as `--run`. Exit 2 blocks the stop.
+
+Environment note: CHECKs run with PATH stripped of relative and repo-internal entries, so a `.venv/bin` or `node_modules/.bin` **inside** the repo is never used — toolchains must live outside the checkout (VIRTUAL_ENV/CARGO_HOME/GOPATH/JAVA_HOME are passed through only when outside the repo). HOME is kept; npm/pip/git user configs are pointed at `/dev/null`.
 
 ## 6. Final report
 
@@ -101,4 +107,6 @@ Checker enforces: CHECK runs under `bash -o errexit -o pipefail -o nounset` (a `
 - A `--supersede` reason is free text. The cap and the permanent log make abuse visible; they do not judge the reason.
 - Stage B reasoning wrongly about a file it did read. Pointers prove access, not judgment. SUBJECT + FALSIFIER shrink the surface.
 - A CHECK that deliberately escapes its process group (`setsid` + ignore SIGHUP) outlives TIMEOUT. The escape is in a repo-owned, frozen script — visible to review, not preventable by the checker.
+- A product that indirects (reads a config it wrote to pick a module that returns the expected value) satisfies the oracle *observably*. The oracle asked for a value and got it; only mutation (python) or a human can tell a real implementation from a decoy.
+- A stateful oracle (passes on its Nth invocation) is a sentinel variant; `--red` sees one invocation. Same answer: mutation or a human.
 - Auth, payments, production merges: human review and host CI remain the bound.
