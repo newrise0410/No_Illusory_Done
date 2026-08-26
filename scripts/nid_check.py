@@ -140,6 +140,7 @@ def expect_match(exp: str, output: str) -> bool:
 def parse_plan(ctx: Ctx):
     if not ctx.plan.exists():
         die("PLAN.md missing")
+    sanity_text("PLAN.md", ctx.plan.read_text(encoding="utf-8"))
     reqs, highs, setup = {}, {}, []
     caps = {"max_iterations": 8, "stall_iters": 3, "max_ci_attempts": 3, "max_supersedes": 1, "max_gates_per_r": 4}
     for ln, raw in enumerate(ctx.plan.read_text(encoding="utf-8").replace("\r", "").splitlines(), 1):
@@ -191,6 +192,23 @@ def parse_plan(ctx: Ctx):
     return reqs, highs, setup, caps
 
 
+LOOKALIKE_ID = re.compile(r"^\s*(?:- \[.\]\s*)?[RHGＲＨＧ][^\s:]{0,4}[:：]")
+
+
+def sanity_text(name: str, text: str) -> None:
+    """Refuse invisible / lookalike characters in structural files."""
+    import unicodedata
+    for ln, line in enumerate(text.splitlines(), 1):
+        for ch in line:
+            cat = unicodedata.category(ch)
+            if cat in ("Cf", "Co", "Cn") or "\u2000" <= ch <= "\u200f" or "\u2028" <= ch <= "\u202f" or ch in "\ufeff\u2060":
+                die(f"{name} line {ln}: invisible/format character U+{ord(ch):04X} not allowed")
+            if unicodedata.east_asian_width(ch) in ("F",) or "\uff00" <= ch <= "\uffef":
+                die(f"{name} line {ln}: fullwidth character {ch!r} not allowed (lookalike id)")
+        if LOOKALIKE_ID.match(line) and not (R_RE.match(line.strip().lstrip("-* ").strip()) or H_RE.match(line.strip().lstrip("-* ").strip()) or GATE_RE.match(line)):
+            die(f"{name} line {ln}: looks like an id but is not a valid R/H/G line: {line.strip()!r}")
+
+
 def inside_repo(ctx: Ctx, p: Path) -> bool:
     """True iff p (and every symlink it goes through) resolves inside the repo root."""
     try:
@@ -218,6 +236,7 @@ def falsifier_is_command(f: str) -> bool:
 def parse_ledger(ctx: Ctx) -> list[Gate]:
     text = ctx.ledger.read_text(encoding="utf-8").replace("\r", "") if ctx.ledger.exists() else ""
     if not text.strip(): die("ledger missing or empty")
+    sanity_text("LEDGER.md", text)
     gates, cur = [], None
     for ln, line in enumerate(text.splitlines(), 1):
         m = GATE_RE.match(line)
