@@ -22,7 +22,7 @@ PLAN.md:
   SETUP: <cmd>           max_iterations: 8    stall_iters: 3
 Gate:
   - [ ] G1: <state>
-    CHECK / EXPECT / CWD / TIMEOUT / RETRIES / FILES / MUTABLE / KIND / RED / COVERS
+    CHECK / EXPECT / CWD / TIMEOUT / RETRIES / FILES / KIND / RED / COVERS / ENV
 """
 from __future__ import annotations
 
@@ -42,7 +42,13 @@ from pathlib import Path
 SELF = Path(__file__).resolve()
 GATE_RE = re.compile(r"^- \[( |x|X)\] (G\d+):\s*(.+?)\s*$")
 FIELD_RE = re.compile(r"^\s*([A-Z]+):\s*(.*?)\s*$")
-FIELDS = {"CHECK", "EXPECT", "CWD", "TIMEOUT", "RETRIES", "FILES", "MUTABLE", "KIND", "RED", "EVIDENCE", "COVERS"}
+FIELDS = {"CHECK", "EXPECT", "CWD", "TIMEOUT", "RETRIES", "FILES", "KIND", "RED", "EVIDENCE", "COVERS", "ENV"}
+# Files that silently change how test runners / interpreters behave. If one is added or
+# modified after the freeze and is not itself frozen, the oracle is no longer the oracle.
+INFLUENCE = re.compile(r"(^|/)(conftest\.py|sitecustomize\.py|usercustomize\.py|[^/]*\.pth|pytest\.ini|tox\.ini|setup\.cfg|pyproject\.toml|"
+                       r"\.env[^/]*|package\.json|jest\.config\.[^/]+|vitest\.config\.[^/]+|babel\.config\.[^/]+|\.babelrc|tsconfig[^/]*\.json|"
+                       r"\.npmrc|\.mocharc[^/]*|Makefile|\.bashrc|\.zshrc|\.profile|__init__\.py)$")
+CLEAN_ENV_KEYS = ("PATH", "HOME", "LANG", "LC_ALL", "TMPDIR", "TERM", "USER", "SHELL")
 R_RE = re.compile(r"^(R\d+):\s*(.+?)\s*$")
 H_RE = re.compile(r"^(H\d+):\s*(.+?)\s*$")
 CAP_RE = re.compile(r"^(max_iterations|stall_iters|max_ci_attempts|max_supersedes|max_gates_per_r):\s*(\d+)\s*$")
@@ -109,7 +115,7 @@ class Gate:
 
     kind = property(lambda s: s.f.get("KIND", "cmd"))
     files = property(lambda s: [x.strip() for x in s.f.get("FILES", "").split(",") if x.strip()])
-    mutable = property(lambda s: [x.strip() for x in s.f.get("MUTABLE", "").split(",") if x.strip()])
+    env = property(lambda s: [x.strip() for x in s.f.get("ENV", "").split(",") if x.strip()])
     covers = property(lambda s: [x.strip() for x in s.f.get("COVERS", "").split(",") if x.strip()])
 
 
@@ -235,6 +241,17 @@ def parse_ledger(ctx: Ctx) -> list[Gate]:
             if rx.search(chk): die(f"{g.id}: forbidden CHECK pattern ({name})")
         lit = exp[1:-1] if is_regex(exp) else exp
         if lit and lit in chk: die(f"{g.id}: CHECK contains EXPECT text (self-fulfilling)")
+        if is_regex(exp):
+            try:
+                rx = re.compile(lit)
+            except re.error as e:
+                die(f"{g.id}: EXPECT regex invalid: {e}")
+            for probe in ("", "FAIL", "error", "x", "NOT THE REQUEST", "Traceback"):
+                if rx.fullmatch(probe): die(f"{g.id}: EXPECT regex is vacuous (matches {probe!r})")
+        if len(lit.strip()) < 3: die(f"{g.id}: EXPECT too short to be a success marker")
+        for kv in g.env:
+            if not re.fullmatch(r"[A-Z_][A-Z0-9_]*=[^\s$`]*", kv) or kv.split("=")[0] in ("PATH", "PYTHONPATH", "NODE_PATH", "LD_PRELOAD", "DYLD_INSERT_LIBRARIES", "PYTHONSTARTUP", "BASH_ENV", "ENV"):
+                die(f"{g.id}: ENV entry not allowed: {kv!r} (literal KEY=value only; no PATH/PYTHONPATH/NODE_PATH/LD_PRELOAD)")
         if g.f.get("RED", "required") not in ("required", "pass-ok"): die(f"{g.id}: bad RED value")
         try:
             t, r = int(g.f.get("TIMEOUT", "300")), int(g.f.get("RETRIES", "0"))
@@ -243,22 +260,19 @@ def parse_ledger(ctx: Ctx) -> list[Gate]:
         if t <= 0 or not 0 <= r <= 2: die(f"{g.id}: TIMEOUT >0, RETRIES 0..2")
         cwd = ctx.root / g.f.get("CWD", ".")
         if not cwd.is_dir() or ctx.rel(cwd).startswith(".."): die(f"{g.id}: CWD not a dir inside repo")
-        # Every existing file the CHECK names must be declared frozen (FILES) or MUTABLE.
-        declared = set(g.files) | set(g.mutable)
+        # Every existing file the CHECK names must be frozen (FILES). A path that does not
+        # exist yet is product output the implementation will create.
+        declared = set(g.files)
         for tok in PATHISH.findall(chk):
             p = cwd / tok
             if p.is_file() and not str(p.resolve()).startswith(str(ctx.nid)):
                 relp = ctx.rel(p)
                 if relp not in declared and tok not in declared:
-                    die(f"{g.id}: CHECK references existing file {relp} not declared in FILES or MUTABLE")
+                    die(f"{g.id}: CHECK references existing file {relp} not in FILES (existing inputs must be frozen; delete it before --red if the implementation must regenerate it)")
         if not g.files: die(f"{g.id}: FILES is empty — a runnable gate must depend on at least one frozen oracle file")
-        for f in g.files + g.mutable:
+        for f in g.files:
             fp = ctx.root / f
-            if not fp.is_file() or not inside_repo(ctx, fp): die(f"{g.id}: FILES/MUTABLE entry missing, not a regular file, or symlinks outside the repo: {f}")
-        for m_ in g.mutable:
-            if re.search(r"(^|[;&|(]\s*)(\S*/)?" + re.escape(Path(m_).name) + r"(\s|$)", chk) or \
-               re.search(r"\b(python[3]?|node|bash|sh|ruby|perl|deno|bun)\s+(-\S+\s+)*(\S*/)?" + re.escape(Path(m_).name) + r"(\s|$)", chk):
-                die(f"{g.id}: MUTABLE file {m_} is executed by CHECK — an oracle the implementer can rewrite is not an oracle")
+            if not fp.is_file() or not inside_repo(ctx, fp): die(f"{g.id}: FILES entry missing, not a regular file, or symlinks outside the repo: {f}")
     checks = [g.f.get("CHECK", "").strip() for g in gates if g.kind == "cmd"]
     if len(checks) != len(set(checks)): die("two gates have identical CHECK commands (duplicate observation)")
     if all(g.kind == "llm-judge" for g in gates):
@@ -291,7 +305,8 @@ def run_gate(ctx: Ctx, g: Gate, record=True) -> dict:
         t0 = time.time()
         try:
             p = subprocess.run(["bash", "-o", "errexit", "-o", "pipefail", "-o", "nounset", "-c", g.f["CHECK"]],
-                               cwd=str(cwd), timeout=timeout, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+                               cwd=str(cwd), timeout=timeout, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                               env=clean_env(g))
             out, code, to = p.stdout.decode("utf-8", "replace"), p.returncode, False
         except subprocess.TimeoutExpired as e:
             out, code, to = (e.output or b"").decode("utf-8", "replace") + "\n[NID TIMEOUT]", -1, True
@@ -310,6 +325,26 @@ def run_gate(ctx: Ctx, g: Gate, record=True) -> dict:
     return {"id": g.id, "pass": last["pass"], "exit": last["exit"], "expect_match": last["expect_match"],
             "sha256": last["sha256"], "bytes": last["bytes"], "attempts": attempts,
             "flaky": last["pass"] and len(attempts) > 1}
+
+
+def clean_env(g: Gate | None = None) -> dict:
+    """Nothing inherited from the caller's shell except a whitelist; gate ENV: values are frozen literals."""
+    env = {k: os.environ[k] for k in CLEAN_ENV_KEYS if k in os.environ}
+    env.update({"PYTHONSAFEPATH": "1", "PYTHONNOUSERSITE": "1", "PYTHONDONTWRITEBYTECODE": "1",
+                "NODE_OPTIONS": "", "CI": "1", "NID": "1"})
+    if g is not None:
+        for kv in g.env:
+            k, _, v = kv.partition("="); env[k] = v
+    return env
+
+
+def influence_check(ctx: Ctx, gates: list[Gate]) -> None:
+    """Refuse if a runner/interpreter-influencing file was added or changed since the freeze and is not frozen."""
+    frozen = set(read_freeze(ctx)[0])
+    fcommit = git(ctx, "log", "-1", "--format=%H", "--", ctx.rel(ctx.freeze)).stdout.strip()
+    bad = [f for f in changed_files(ctx, fcommit) if INFLUENCE.search(f) and f not in frozen]
+    if bad:
+        die(f"runner-influencing files changed since the freeze and are not frozen: {', '.join(bad)} -> the oracle is no longer the oracle")
 
 
 def run_all(ctx: Ctx, gates: list[Gate], record=True) -> dict[str, dict]:
@@ -482,6 +517,7 @@ def stage_a(ctx: Ctx, gates: list[Gate], record=True) -> tuple[bool, dict, list[
     """Freeze -> run -> freeze again. Returns (pass, results, unmet)."""
     if not verify_freeze(ctx, gates, quiet=True):
         verify_freeze(ctx, gates); die("refusing: freeze mismatch before run")
+    influence_check(ctx, gates)
     results = run_all(ctx, gates, record)
     if not verify_freeze(ctx, gates, quiet=True):
         verify_freeze(ctx, gates)
@@ -576,7 +612,7 @@ def verify_pointer(ctx: Ctx, hid: str, ptr: str, subjects: list[str]) -> str | N
             if rx.search(cmd): return f"{hid}: pointer command forbidden ({name})"
         try:
             r = subprocess.run(["bash", "-o", "pipefail", "-c", cmd], cwd=str(ctx.root), timeout=300,
-                               stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+                               stdout=subprocess.PIPE, stderr=subprocess.STDOUT, env=clean_env())
         except (subprocess.TimeoutExpired, OSError) as e:
             return f"{hid}: pointer command failed to run ({e})"
         out = r.stdout.decode("utf-8", "replace")

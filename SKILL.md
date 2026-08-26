@@ -57,13 +57,13 @@ max_supersedes: 1        max_gates_per_r: 4
   CHECK: npx vitest run tests/pricing.spec.ts && cat tests/nid/G1.marker
   EXPECT: NID G1                                          # literal or /regex/, last non-empty line
   FILES: tests/pricing.spec.ts, tests/nid/G1.marker       # frozen; at least one required
-  MUTABLE: fixtures/generated.json                        # existing files CHECK reads that may change; never executed
+  ENV: PRICING_MODE=test                                  # optional literal env; frozen with the ledger
   COVERS: R1
   CWD: .        TIMEOUT: 300        RETRIES: 0            # RETRIES 0..2; pass-on-retry flagged flaky
   KIND: cmd     RED: required                             # llm-judge → no CHECK; pass-ok → regression gate only
 ```
 
-Checker enforces: CHECK runs under `bash -o errexit -o pipefail -o nounset` (a `;`-masked failure fails); forbidden: `echo printf true false : command eval exec source env xargs nohup nice time sh -c exit 0 passWithNoTests || true python -c touch cp mv rm tee sed -i >` and any `$`, backtick, heredoc or `VAR=` (use a repo-owned script); CHECK may not contain EXPECT; **every existing file a CHECK names must be in FILES or MUTABLE**, FILES non-empty, all inside the repo, no symlinks out; a MUTABLE file may not be what CHECK executes; no two gates with identical CHECK; at most `max_gates_per_r` gates per R; `RED: pass-ok` only for gates whose FILES were committed at HEAD before the freeze and that pass at `--red`; at least one `RED: required` gate.
+Checker enforces: CHECK runs under `bash -o errexit -o pipefail -o nounset` (a `;`-masked failure fails); forbidden: `echo printf true false : command eval exec source env xargs nohup nice time sh -c exit 0 passWithNoTests || true python -c touch cp mv rm tee sed -i >` and any `$`, backtick, heredoc or `VAR=` (use a repo-owned script); CHECK may not contain EXPECT; **every existing file a CHECK names must be in FILES** (a path that does not exist yet is product output), FILES non-empty, all inside the repo, no symlinks out; EXPECT regexes that match `""`/`FAIL`/arbitrary text are refused; CHECK runs in a **clean environment** (PATH/HOME/LANG/TMPDIR only, `PYTHONSAFEPATH=1`, `PYTHONNOUSERSITE=1`; `ENV:` may add literal values but never PATH/PYTHONPATH/NODE_PATH/LD_PRELOAD); `--run` refuses if a **runner-influencing file** (conftest.py, sitecustomize.py, *.pth, pytest.ini, pyproject.toml, package.json, jest/vitest/babel config, tsconfig, .env, Makefile, __init__.py…) was added or changed since the freeze without being frozen; no two gates with identical CHECK; at most `max_gates_per_r` gates per R; `RED: pass-ok` only for gates whose FILES were committed at HEAD before the freeze and that pass at `--red`; at least one `RED: required` gate.
 
 ## 4. Roles
 
@@ -95,7 +95,7 @@ Checker enforces: CHECK runs under `bash -o errexit -o pipefail -o nounset` (a `
 
 - Deleting `.no-illusory-done/`, rewriting git history, or never loading the skill. Visible in history; not preventable here.
 - A test-writer who omits a requirement from R, or writes a gate that a mutant of the *wrong* file cannot reach. `--mutate` (python only in v1) catches vacuous oracles for changed python; other languages are `inconclusive`.
-- A CHECK that depends on an undeclared sentinel the implementer can create (`test -f x && …`). `--red` proves the oracle failed at time zero, not that it fails for the right reason. For changed python, `--mutate` flags such a gate as vacuous (mutants survive); for other languages it is `inconclusive`, and a human must read the ledger.
+- A frozen oracle that reads a file the implementer writes (`test -f x && …`, a JSON flag, product output that is really a pass token). An oracle *must* read the product; a product that is just a pass flag is indistinguishable mechanically. `--red` proves the oracle failed at time zero, not that it fails for the right reason. For changed python, `--mutate` flags such a gate as vacuous (mutants survive); for other languages it is `inconclusive`, and a human must read the ledger.
 - `COVERS` is by id. One gate claiming `R1, R2, R3` while testing R1 passes `--status`; only mutation (python) or a human catches it. A FALSIFIER that is well-formed prose but meaningless passes too — Stage B must refuse to grade it.
 - Iteration/stall counters are kept in `STATE.md` and in git refs (`refs/nid/iteration`, `refs/nid/stall`; the larger wins). Deleting the refs resets the caps. Caps bound accidental looping, not adversarial looping.
 - A `--supersede` reason is free text. The cap and the permanent log make abuse visible; they do not judge the reason.

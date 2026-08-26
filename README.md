@@ -60,7 +60,9 @@ Before any implementation, the test-writer runs every gate. **Each must fail.** 
 - refuses if any hashed file differs — checked **before and after** running the gates, so a CHECK that rewrites a frozen file mid-run is caught;
 - refuses if `FREEZE.sha256` differs from `git HEAD`, or if more commits touched it than the `SUPERSEDE` lines it declares — a re-freeze must be declared with `--red --supersede "<reason>"` and stays in the file forever;
 - refuses outside a git repository (no witness → no verdict);
-- refuses if a CHECK names an existing file that is neither in `FILES` (frozen) nor `MUTABLE` (declared changeable); `FILES` must be non-empty and inside the repo, and a `MUTABLE` file may never be the thing CHECK executes;
+- refuses if a CHECK names an existing file that is not in `FILES` (a path that does not exist yet is product output); `FILES` must be non-empty and inside the repo;
+- runs every CHECK in a clean environment (PATH/HOME/LANG/TMPDIR only, `PYTHONSAFEPATH=1`, `PYTHONNOUSERSITE=1`; a gate's `ENV:` adds frozen literals, never PATH/PYTHONPATH/NODE_PATH/LD_PRELOAD), so nothing inherited from the implementer's shell reaches the oracle;
+- refuses `--run` if a runner-influencing file (`conftest.py`, `sitecustomize.py`, `*.pth`, `pytest.ini`, `pyproject.toml`, `package.json`, jest/vitest/babel config, `tsconfig`, `.env`, `Makefile`, `__init__.py`, …) was added or changed since the freeze without being frozen;
 - refuses more than `max_supersedes` declared re-freezes (default 1).
 
 What git cannot witness — history rewrite, force-push — is outside the checker.
@@ -248,7 +250,7 @@ python3 scripts/nid_check.py --report                       # paste verbatim; "d
 | `--report` | re-run Stage A + CI validation; print verdict | `VERDICT: merge-ok` |
 | `--hook` | Stop-hook entry (no ledger → exit 0; else `--run`) | ALL MET |
 
-Gate fields: `CHECK` (run under `bash -o errexit -o pipefail -o nounset`), `EXPECT` (literal or `/regex/`, **last non-empty line** of stdout+stderr), `CWD`, `TIMEOUT` (300 s), `RETRIES` (0–2; pass-on-retry flagged flaky), `FILES` (frozen), `MUTABLE` (existing files the CHECK reads that may change), `KIND` (`cmd` | `llm-judge`), `RED` (`required` | `pass-ok`), `COVERS`.
+Gate fields: `CHECK` (run under `bash -o errexit -o pipefail -o nounset` in a clean env), `EXPECT` (literal ≥3 chars or a non-vacuous `/regex/`, **last non-empty line** of stdout+stderr), `CWD`, `TIMEOUT` (300 s), `RETRIES` (0–2; pass-on-retry = process fail in CI), `FILES` (frozen, non-empty), `ENV` (frozen literal `KEY=value` list), `KIND` (`cmd` | `llm-judge`), `RED` (`required` | `pass-ok`), `COVERS`.
 
 ### 5.5 Artifacts
 
@@ -267,7 +269,7 @@ Gate fields: `CHECK` (run under `bash -o errexit -o pipefail -o nounset`), `EXPE
 - **An agent that never loads the skill**, or deletes `.no-illusory-done/`. Git history shows it; nothing prevents it.
 - **History rewrite / force-push.** Git HEAD is the freeze witness; an actor who rewrites history defeats it. Branch protection or a human is the bound.
 - **A requirement omitted from R.** Traceability is by id; nothing checks that R1..Rn is the whole request.
-- **A gate that fails at time zero for the wrong reason** (`test -f sentinel && …`). `--red` cannot distinguish "no implementation" from "no sentinel". For changed python, `--mutate` flags the gate as vacuous; for other languages it is `inconclusive` and a human must read the ledger.
+- **A frozen oracle that reads what the implementer writes.** An oracle must read the product; a "product" that is just a pass flag (`test -f sentinel`, `{"pass": true}`) is mechanically indistinguishable from a real one. `--red` cannot tell "no implementation" from "no sentinel". For changed python, `--mutate` flags the gate as vacuous; for other languages it is `inconclusive` and a human must read the ledger.
 - **`COVERS` semantics.** One gate claiming three Rs while testing one passes the id check; `max_gates_per_r` bounds dilution, mutation catches it for python, nothing else does.
 - **Caps are advisory against an adversary.** Counters live in `STATE.md` and git refs (`refs/nid/*`, the larger wins); `git update-ref -d` resets them. They stop accidental loops, not deliberate ones.
 - **`--supersede` reasons are free text.** The cap and the permanent log make re-freezes visible; they do not judge them.
