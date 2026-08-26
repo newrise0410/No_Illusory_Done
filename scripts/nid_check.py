@@ -700,15 +700,29 @@ def set_ref_counter(ctx: Ctx, name: str, value: int) -> None:
     set_ref_blob(ctx, name, str(value))
 
 
+def nid_snapshot(ctx: Ctx) -> dict[str, str]:
+    """Hashes of everything under .no-illusory-done except evidence/ (which the checker itself writes)."""
+    out = {}
+    for p in ctx.nid.rglob("*"):
+        if p.is_file() and "evidence" not in p.relative_to(ctx.nid).parts:
+            out[str(p.relative_to(ctx.nid))] = sha_file(p)
+    return out
+
+
 def stage_a(ctx: Ctx, gates: list[Gate], record=True) -> tuple[bool, dict, list[str]]:
     """Freeze -> run -> freeze again. Returns (pass, results, unmet)."""
     if not verify_freeze(ctx, gates, quiet=True):
         verify_freeze(ctx, gates); die("refusing: freeze mismatch before run")
     influence_check(ctx, gates)
+    before = nid_snapshot(ctx)
     results = run_all(ctx, gates, record)
     if not verify_freeze(ctx, gates, quiet=True):
         verify_freeze(ctx, gates)
         die("a CHECK mutated a frozen file during the run -> reject")
+    after = nid_snapshot(ctx)
+    if before != after:
+        changed = sorted(set(before) ^ set(after) | {k for k in before if k in after and before[k] != after[k]})
+        die(f"a CHECK wrote into .no-illusory-done during the run ({', '.join(changed)}) -> product code may not touch checker files; reject")
     unmet = [gid for gid, r in results.items() if not r["pass"]]
     return not unmet, results, unmet
 
