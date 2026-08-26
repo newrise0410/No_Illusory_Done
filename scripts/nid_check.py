@@ -69,7 +69,7 @@ BAD_CHECK = [
     (re.compile(r"\bexit\s+0\b"), "exit 0"),
     (re.compile(r"passWithNoTests|--no-verify|\|\|"), "skip/soften flag or '||' fallback (a gate must be conjunctive)"),
     (re.compile(r"python[3]?\s+-c\b"), "python -c"),
-    (re.compile(r"(^|\s)(touch|cp|mv|rm|tee|sed\s+-i|>>?)\s"), "mutating command in CHECK"),
+    (re.compile(r"(^|\s)(touch|cp|mv|rm|tee|sed\s+-i)\s|[<>]"), "mutating command or redirection in CHECK"),
     (re.compile(r"[$`]|<<|(^|[;&|(]\s*)\w+=\S"), "shell expansion/heredoc/assignment (use a repo-owned script)"),
 ]
 
@@ -212,7 +212,7 @@ def parse_plan(ctx: Ctx):
                 sp = (ctx.root / s)
                 if not inside_repo(ctx, sp) or not sp.is_file():
                     die(f"PLAN.md {hid}: SUBJECT must be an existing regular file inside the repo (not a directory, not a symlink out): {s}")
-                if str(sp.resolve()).startswith(str(ctx.nid)):
+                if in_nid(ctx, sp):
                     die(f"PLAN.md {hid}: SUBJECT may not be inside .no-illusory-done")
                 if sp.suffix.lower() in (".md", ".txt", ".rst", ".adoc", ".html", ".log"):
                     die(f"PLAN.md {hid}: SUBJECT {s} is prose, not the artifact where the property lives; a rewritten claim is not evidence")
@@ -238,8 +238,10 @@ def sanity_text(name: str, text: str) -> None:
             cat = unicodedata.category(ch)
             if cat in ("Cf", "Co", "Cn") or "\u2000" <= ch <= "\u200f" or "\u2028" <= ch <= "\u202f" or ch in "\ufeff\u2060":
                 die(f"{name} line {ln}: invisible/format character U+{ord(ch):04X} not allowed")
-            if unicodedata.east_asian_width(ch) in ("F",) or "\uff00" <= ch <= "\uffef":
-                die(f"{name} line {ln}: fullwidth character {ch!r} not allowed (lookalike id)")
+        head = re.split(r"[:：]", line, 1)[0]
+        for ch in head:
+            if unicodedata.east_asian_width(ch) == "F" or "\uff00" <= ch <= "\uffef":
+                die(f"{name} line {ln}: fullwidth character {ch!r} in an id/field position (lookalike id)")
         fm = FIELD_RE.match(line)
         if fm and fm.group(1) in FIELDS:
             continue
@@ -247,6 +249,11 @@ def sanity_text(name: str, text: str) -> None:
             die(f"{name} line {ln}: looks like a gate but is not exactly '- [ ] Gn: title': {line.strip()!r}")
         if LOOKALIKE_ID.match(line) and not (R_RE.match(line.strip().lstrip("-* ").strip()) or H_RE.match(line.strip().lstrip("-* ").strip()) or GATE_RE.match(line)):
             die(f"{name} line {ln}: looks like an id but is not a valid R/H/G line: {line.strip()!r}")
+
+
+def in_nid(ctx: Ctx, p: Path) -> bool:
+    r = str(p.resolve())
+    return r == str(ctx.nid) or r.startswith(str(ctx.nid) + os.sep)
 
 
 def inside_repo(ctx: Ctx, p: Path) -> bool:
@@ -356,13 +363,13 @@ def parse_ledger(ctx: Ctx) -> list[Gate]:
         for tok in toks:
             if not tok or tok == "--": continue
             p = cwd / tok
-            if p.is_dir() and tok not in (".", "./") and not str(p.resolve()).startswith(str(ctx.nid)):
+            if p.is_dir() and tok not in (".", "./") and not in_nid(ctx, p):
                 reld = ctx.rel(p)
                 if not under(reld, prod):
                     inside = [ctx.rel(x) for x in p.rglob("*") if x.is_file()]
                     if any(x not in declared for x in inside):
                         die(f"{g.id}: CHECK names directory {reld} outside PRODUCT; every file under it must be in FILES (or name files explicitly)")
-            if p.is_file() and not str(p.resolve()).startswith(str(ctx.nid)):
+            if p.is_file() and not in_nid(ctx, p):
                 relp = ctx.rel(p)
                 if under(relp, prod): continue  # product files may be read (never executed, checked above)
                 if relp not in declared and tok not in declared:
@@ -814,7 +821,7 @@ def verify_pointer(ctx: Ctx, hid: str, ptr: str, subjects: list[str]) -> str | N
         rp = ctx.rel(p)
         if rp.startswith("..") or p.is_absolute() and not str(p.resolve()).startswith(str(ctx.root)):
             return f"{hid}: pointer outside repo: {pth}"
-        if str(p.resolve()).startswith(str(ctx.nid)): return f"{hid}: pointer inside .no-illusory-done (not an artifact)"
+        if in_nid(ctx, p): return f"{hid}: pointer inside .no-illusory-done (not an artifact)"
         if not p.is_file(): return f"{hid}: pointer file missing {pth}"
         if "*" in subjects:
             pass  # llm-judge gates: any regular file inside the repo
