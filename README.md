@@ -274,6 +274,7 @@ Gate fields: `CHECK` (run under `bash -o errexit -o pipefail -o nounset` in a cl
 - **Caps are advisory against an adversary.** Counters live in `STATE.md` and git refs (`refs/nid/*`, the larger wins); `git update-ref -d` resets them. They stop accidental loops, not deliberate ones.
 - **`--supersede` reasons are free text.** The cap and the permanent log make re-freezes visible; they do not judge them.
 - **A grader that reads the right file and reasons wrongly.** Pointers + SUBJECT prove access to the relevant artifact, not judgment.
+- **A CHECK that deliberately daemonizes.** TIMEOUT kills the process group; a child that calls `setsid` and ignores SIGHUP survives. It lives in a frozen, repo-owned script, so it is reviewable, not preventable.
 - **Auth, payments, production merges.** Human review and host CI remain the right bound there.
 
 ## 7. Lineage

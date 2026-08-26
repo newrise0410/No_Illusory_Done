@@ -100,4 +100,5 @@ Checker enforces: CHECK runs under `bash -o errexit -o pipefail -o nounset` (a `
 - Iteration/stall counters are kept in `STATE.md` and in git refs (`refs/nid/iteration`, `refs/nid/stall`; the larger wins). Deleting the refs resets the caps. Caps bound accidental looping, not adversarial looping.
 - A `--supersede` reason is free text. The cap and the permanent log make abuse visible; they do not judge the reason.
 - Stage B reasoning wrongly about a file it did read. Pointers prove access, not judgment. SUBJECT + FALSIFIER shrink the surface.
+- A CHECK that deliberately escapes its process group (`setsid` + ignore SIGHUP) outlives TIMEOUT. The escape is in a repo-owned, frozen script — visible to review, not preventable by the checker.
 - Auth, payments, production merges: human review and host CI remain the bound.

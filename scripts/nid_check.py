@@ -403,8 +403,13 @@ def read_freeze(ctx: Ctx):
     return files, reds, sup
 
 
+GIT_ENV = {**{k: os.environ[k] for k in ("PATH", "HOME", "LANG", "LC_ALL", "TMPDIR") if k in os.environ},
+           "GIT_NO_REPLACE_OBJECTS": "1", "GIT_CONFIG_NOSYSTEM": "1", "GIT_TERMINAL_PROMPT": "0"}
+
+
 def git(ctx: Ctx, *args) -> subprocess.CompletedProcess:
-    return subprocess.run(["git", "-C", str(ctx.root), *args], capture_output=True, text=True)
+    """All git reads ignore replacement objects, aliases, and inherited env; hooks are not invoked by reads."""
+    return subprocess.run(["git", "--no-replace-objects", "-C", str(ctx.root), *args], capture_output=True, text=True, env=GIT_ENV)
 
 
 def verify_freeze(ctx: Ctx, gates: list[Gate] | None = None, quiet=False) -> bool:
@@ -537,8 +542,8 @@ def ref_counter(ctx: Ctx, name: str) -> int:
 
 
 def set_ref_counter(ctx: Ctx, name: str, value: int) -> None:
-    h = subprocess.run(["git", "-C", str(ctx.root), "hash-object", "-w", "--stdin"], input=str(value),
-                       capture_output=True, text=True).stdout.strip()
+    h = subprocess.run(["git", "--no-replace-objects", "-C", str(ctx.root), "hash-object", "-w", "--stdin"], input=str(value),
+                       capture_output=True, text=True, env=GIT_ENV).stdout.strip()
     git(ctx, "update-ref", f"refs/nid/{name}", h)
 
 
