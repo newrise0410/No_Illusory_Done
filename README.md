@@ -185,7 +185,7 @@ max_ci_attempts: 3
   COVERS: R2
 
 - [ ] G3: diff introduces no token-shaped strings
-  CHECK: git diff main -- . ':!*.lock' | grep -Ev '^-' | grep -Eq '(sk|ghp|AKIA)[A-Za-z0-9_-]{16,}' && exit 1 || cat tests/nid/G3.marker
+  CHECK: git diff main -- . ':!*.lock' | grep -Ev '^-' | grep -Eq '(sk|ghp|AKIA)[A-Za-z0-9_-]{16,}' && exit 1; cat tests/nid/G3.marker
   EXPECT: NID G3
   FILES: tests/nid/G3.marker
   COVERS: R3
