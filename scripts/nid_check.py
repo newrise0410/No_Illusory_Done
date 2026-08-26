@@ -50,6 +50,9 @@ INFLUENCE = re.compile(r"(^|/)(conftest\.py|sitecustomize\.py|usercustomize\.py|
                        r"\.env[^/]*|package\.json|jest\.config\.[^/]+|vitest\.config\.[^/]+|babel\.config\.[^/]+|\.babelrc|tsconfig[^/]*\.json|"
                        r"\.npmrc|\.mocharc[^/]*|Makefile|\.bashrc|\.zshrc|\.profile|__init__\.py)$")
 CLEAN_ENV_KEYS = ("PATH", "HOME", "LANG", "LC_ALL", "TMPDIR", "TERM", "USER", "SHELL")
+MAX_OUTPUT = 8 * 1024 * 1024  # bytes of CHECK output; more is a failed gate, not a parse problem
+# Generated dependency trees: never the product, never an oracle input; excluded from the influence scan when gitignored.
+DEP_DIRS = re.compile(r"(^|/)(node_modules|\.venv|venv|\.tox|\.nox|vendor|target|build|dist|__pycache__|\.cache|\.pytest_cache|\.mypy_cache|site-packages)/")
 TOOLCHAIN_KEYS = ("VIRTUAL_ENV", "CARGO_HOME", "RUSTUP_HOME", "GOPATH", "GOROOT", "GOCACHE", "GOMODCACHE", "JAVA_HOME", "NVM_DIR", "PYENV_ROOT", "npm_config_cache")
 # SUBJECT commands whose output does not depend on the change under review.
 CONSTANT_CMD = re.compile(r"^(git\s+(log|rev-parse|rev-list|describe|branch|remote|config|status|tag|show-ref|symbolic-ref)|date|whoami|pwd|uname|hostname|id|ls|wc|cat|head|tail|stat|md5|shasum|sha256sum|python[3]?\s+--version|node\s+-v)\b")
@@ -319,7 +322,7 @@ def parse_ledger(ctx: Ctx) -> list[Gate]:
             t = int(g.f.get("TIMEOUT", "300"))
         except ValueError:
             die(f"{g.id}: TIMEOUT must be an integer")
-        if t <= 0: die(f"{g.id}: TIMEOUT >0")
+        if t <= 0 or t > 3600: die(f"{g.id}: TIMEOUT must be 1..3600 seconds")
         cwd = ctx.root / g.f.get("CWD", ".")
         if not cwd.is_dir() or ctx.rel(cwd).startswith(".."): die(f"{g.id}: CWD not a dir inside repo")
         # Every existing file the CHECK names must be frozen (FILES). A path that does not
@@ -334,6 +337,20 @@ def parse_ledger(ctx: Ctx) -> list[Gate]:
             die(f"{g.id}: CHECK is not parseable as shell words ({e})")
         toks = set(words)
         prod = parse_plan(ctx)[3]["_product"]
+        # The oracle may READ the product but may not EXECUTE it: an executed product file is an oracle the
+        # implementer writes. Refuse a command word, an interpreter target, or a `-m module` under PRODUCT.
+        INTERP = {"python", "python3", "node", "bash", "sh", "zsh", "ruby", "perl", "deno", "bun", "php", "tsx", "ts-node", "npx"}
+        for i, w in enumerate(words):
+            cand = None
+            if i == 0 or (i > 0 and words[i - 1] in INTERP) or (i > 0 and words[i - 1] == "run" and i > 1 and words[i - 2] == "go"):
+                cand = w
+            elif i > 1 and words[i - 1] == "-m" and words[i - 2] in INTERP:
+                cand = w.replace(".", "/")
+            if cand:
+                for c in (cand, cand + ".py", cand + "/__main__.py", cand + ".js"):
+                    cp = cwd / c
+                    if cp.exists() and under(ctx.rel(cp), prod):
+                        die(f"{g.id}: CHECK executes product path {ctx.rel(cp)} — the oracle must be a frozen file, never the product")
         for tok in toks:
             if not tok or tok == "--": continue
             p = cwd / tok
@@ -345,6 +362,7 @@ def parse_ledger(ctx: Ctx) -> list[Gate]:
                         die(f"{g.id}: CHECK names directory {reld} outside PRODUCT; every file under it must be in FILES (or name files explicitly)")
             if p.is_file() and not str(p.resolve()).startswith(str(ctx.nid)):
                 relp = ctx.rel(p)
+                if under(relp, prod): continue  # product files may be read (never executed, checked above)
                 if relp not in declared and tok not in declared:
                     die(f"{g.id}: CHECK references existing file {relp} not in FILES (existing inputs must be frozen; delete it before --red if the implementation must regenerate it)")
         if not g.files: die(f"{g.id}: FILES is empty — a runnable gate must depend on at least one frozen oracle file")
@@ -390,6 +408,8 @@ def run_gate(ctx: Ctx, g: Gate, record=True) -> dict:
             try:
                 raw, _ = proc.communicate(timeout=timeout)
                 out, code, to = raw.decode("utf-8", "replace"), proc.returncode, False
+                if len(raw) > MAX_OUTPUT:
+                    out, code = out[-4096:] + f"\n[NID OUTPUT TOO LARGE: {len(raw)} bytes > {MAX_OUTPUT}]", -1
             except subprocess.TimeoutExpired:
                 kill_group(proc)
                 try:
@@ -428,7 +448,7 @@ def kill_group(proc: subprocess.Popen) -> None:
         pass
 
 
-CRASH_KILL = re.compile(r"(ImportError|ModuleNotFoundError|SyntaxError|NameError|IndentationError|cannot import name)")
+CRASH_KILL = re.compile(r"(ImportError|ModuleNotFoundError|SyntaxError|NameError|IndentationError|cannot import name|FileNotFoundError|No such file or directory)")
 
 
 def clean_env(g: Gate | None = None) -> dict:
@@ -476,7 +496,9 @@ def influence_check(ctx: Ctx, gates: list[Gate]) -> None:
         p = ctx.root / f
         if p.is_symlink() and not inside_repo(ctx, p):
             die(f"symlink {f} added since the freeze points outside the repo")
-    bad = [f for f in changed_files(ctx, fcommit, include_ignored=True) if INFLUENCE.search(f) and f not in frozen and f not in expected]
+    visible = set(changed)
+    bad = [f for f in changed_files(ctx, fcommit, include_ignored=True)
+           if INFLUENCE.search(f) and f not in frozen and f not in expected and not (f not in visible and DEP_DIRS.search(f))]
     if bad:
         die(f"runner-influencing files changed since the freeze and are not frozen or EXPECTED_NEW: {', '.join(bad)}")
 
@@ -990,9 +1012,11 @@ def mutation_verdict(ctx: Ctx, gates: list[Gate], verbose=False) -> dict:
                 if git(ctx, "worktree", "add", "--detach", str(wt), "HEAD").returncode != 0: die("git worktree add failed")
                 try:
                     # carry uncommitted working tree changes, then apply mutant
-                    for cf in changed_files(ctx, "HEAD"):
+                    for cf in changed_files(ctx, "HEAD", include_ignored=True):
+                        if DEP_DIRS.search(cf + "/"): continue
                         s, d = ctx.root / cf, wt / cf
                         if s.is_file(): d.parent.mkdir(parents=True, exist_ok=True); shutil.copy2(s, d)
+                    (wt / f).parent.mkdir(parents=True, exist_ok=True)
                     (wt / f).write_text(ast.unparse(tree), encoding="utf-8")
                     sub = Ctx(wt / ".no-illusory-done" / "LEDGER.md")
                     rs = run_all(sub, gates, record=True)
