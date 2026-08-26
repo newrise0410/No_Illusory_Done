@@ -28,6 +28,18 @@ Ledger gate contract (indentation of field lines is free):
 
 EXPECT match rule: stdout+stderr combined, last non-empty line must equal
 EXPECT literally (whitespace-stripped) or fullmatch /regex/.
+
+Traceability (PLAN.md, same dir as LEDGER.md):
+  R1: <atomic requirement clause>          every R must be covered by >=1 gate
+  H1: <high-level state> | FALSIFIER: <observation that would make it false>
+      a FALSIFIER that is a command ("$ ...") is refused: make it a KIND: cmd gate
+  gate field  COVERS: R1,R3                every gate must cover >=1 known R
+
+CI.md evidence pointers (checked by --ci; a pass without a verifiable pointer
+is downgraded to reject):
+  H1: pass @ src/x.ts:41-58 sha=<>=12 hex of those lines>
+  H2: pass $ curl -s localhost/tiers | jq length sha=<>=12 hex of output>
+  H3: fail <free text>
 """
 from __future__ import annotations
 
@@ -51,7 +63,7 @@ SELF = Path(__file__).resolve()
 
 GATE_RE = re.compile(r"^- \[( |x|X)\] (G\d+):\s*(.+?)\s*$")
 FIELD_RE = re.compile(r"^\s*([A-Z]+):\s*(.*?)\s*$")
-FIELDS = {"CHECK", "EXPECT", "CWD", "TIMEOUT", "RETRIES", "FILES", "KIND", "RED", "EVIDENCE"}
+FIELDS = {"CHECK", "EXPECT", "CWD", "TIMEOUT", "RETRIES", "FILES", "KIND", "RED", "EVIDENCE", "COVERS"}
 
 # CHECK lines that observe nothing. Blacklist is a weak barrier; the real
 # barrier is --red (oracle must fail before implementation).
@@ -152,7 +164,63 @@ def parse_ledger(path: Path) -> list[Gate]:
             die(f"{g.id}: TIMEOUT must be >0, RETRIES 0..2")
     if all(g.kind == "llm-judge" for g in gates):
         die("all gates are llm-judge; at least one runnable gate required")
+    reqs, _ = parse_plan(path)
+    check_traceability(gates, reqs)
     return gates
+
+
+R_RE = re.compile(r"^(R\d+):\s*(.+?)\s*$")
+H_RE = re.compile(r"^(H\d+):\s*(.+?)\s*$")
+CMDISH = re.compile(r"^\$\s|^(grep|curl|git|npm|npx|pnpm|yarn|python3?|pytest|node|test|ls|cat|diff|jq|make|cargo|go)\b")
+
+
+def parse_plan(ledger: Path) -> tuple[dict[str, str], dict[str, dict]]:
+    plan = ledger.parent / "PLAN.md"
+    if not plan.exists():
+        die(f"PLAN.md missing next to {ledger}")
+    reqs, highs = {}, {}
+    for ln, line in enumerate(plan.read_text(encoding="utf-8").splitlines(), 1):
+        line = line.strip().lstrip("-* ").strip()
+        m = R_RE.match(line)
+        if m:
+            if m.group(1) in reqs:
+                die(f"PLAN.md duplicate {m.group(1)} (line {ln})")
+            reqs[m.group(1)] = m.group(2)
+            continue
+        m = H_RE.match(line)
+        if m:
+            hid = m.group(1)
+            if hid in highs:
+                die(f"PLAN.md duplicate {hid} (line {ln})")
+            body = m.group(2)
+            if "| FALSIFIER:" not in body:
+                die(f"PLAN.md {hid}: missing '| FALSIFIER: <observation>' (line {ln})")
+            state, fals = [x.strip() for x in body.split("| FALSIFIER:", 1)]
+            if len(state) < 8 or len(fals) < 8:
+                die(f"PLAN.md {hid}: state/FALSIFIER too vague (line {ln})")
+            if CMDISH.match(fals):
+                die(f"PLAN.md {hid}: FALSIFIER is a command -> make it a KIND: cmd gate, not a HIGH-LEVEL line")
+            if re.search(r"looks good|covers the feature|works correctly|as expected", body, re.I):
+                die(f"PLAN.md {hid}: forbidden vague phrase (line {ln})")
+            highs[hid] = {"state": state, "falsifier": fals}
+    if not reqs:
+        die("PLAN.md has no R1.. requirement clauses")
+    return reqs, highs
+
+
+def check_traceability(gates: list[Gate], reqs: dict[str, str]) -> None:
+    covered = set()
+    for g in gates:
+        cov = [x.strip() for x in g.f.get("COVERS", "").split(",") if x.strip()]
+        if not cov:
+            die(f"{g.id}: missing COVERS (which R does this gate observe?)")
+        for r in cov:
+            if r not in reqs:
+                die(f"{g.id}: COVERS unknown requirement {r}")
+        covered.update(cov)
+    missing = sorted(set(reqs) - covered, key=lambda x: int(x[1:]))
+    if missing:
+        die(f"requirements with no gate: {','.join(missing)}")
 
 
 def is_regex(exp: str) -> bool:
@@ -422,6 +490,59 @@ def parse_ci(path: Path) -> dict:
     return vals
 
 
+PTR_RE = re.compile(r"^([GH]\d+):\s*(pass|fail)\s*(.*?)\s*$")
+FILE_PTR = re.compile(r"^@\s*(\S+?)(?::(\d+)(?:-(\d+))?)?\s+sha=([0-9a-f]{12,64})$")
+CMD_PTR = re.compile(r"^\$\s*(.+?)\s+sha=([0-9a-f]{12,64})$")
+
+
+def verify_pointer(hid: str, ptr: str) -> str | None:
+    """Return None if the pointer checks out, else a reason."""
+    m = FILE_PTR.match(ptr)
+    if m:
+        p, l1, l2, h = Path(m.group(1)), m.group(2), m.group(3), m.group(4)
+        if not p.exists():
+            return f"{hid}: pointer file missing {p}"
+        if l1:
+            lines = p.read_text(encoding="utf-8", errors="replace").splitlines()
+            a, b = int(l1), int(l2 or l1)
+            if a < 1 or b > len(lines) or a > b:
+                return f"{hid}: line range {a}-{b} out of bounds for {p}"
+            actual = sha("\n".join(lines[a - 1:b]).encode())
+        else:
+            actual = sha_file(p)
+        return None if actual.startswith(h) else f"{hid}: file hash mismatch for {p} (grader did not read this version)"
+    m = CMD_PTR.match(ptr)
+    if m:
+        cmd, h = m.group(1), m.group(2)
+        try:
+            r = subprocess.run(cmd, shell=True, timeout=300, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+        except (subprocess.TimeoutExpired, OSError) as e:
+            return f"{hid}: pointer command failed to run ({e})"
+        actual = sha(r.stdout.decode("utf-8", "replace").encode())
+        return None if actual.startswith(h) else f"{hid}: command output hash mismatch (grader did not run this)"
+    return f"{hid}: pass without a verifiable pointer (@ path sha=.. | $ cmd sha=..)"
+
+
+def check_ci_pointers(path: Path, required: list[str]) -> tuple[dict[str, str], list[str]]:
+    verdicts, problems = {}, []
+    for line in path.read_text(encoding="utf-8").splitlines():
+        m = PTR_RE.match(line.strip())
+        if not m:
+            continue
+        hid, res, ptr = m.groups()
+        if hid in verdicts:
+            problems.append(f"{hid}: duplicate verdict line"); continue
+        verdicts[hid] = res
+        if res == "pass":
+            why = verify_pointer(hid, ptr)
+            if why:
+                problems.append(why); verdicts[hid] = "fail"
+    for hid in required:
+        if hid not in verdicts:
+            problems.append(f"{hid}: no verdict line in CI.md")
+    return verdicts, problems
+
+
 def cmd_ci(path: Path) -> None:
     v = parse_ci(path)
     fz = verify_freeze(quiet=True)
@@ -430,14 +551,20 @@ def cmd_ci(path: Path) -> None:
     last = json.loads(LAST_RUN.read_text())
     stage_a_ok = not last["unmet_cmd"]
     problems = []
+    ledger = path.parent / "LEDGER.md"
+    _, highs = parse_plan(ledger)
+    required = list(highs) + last.get("llm_judge", [])
+    verdicts, ptr_problems = check_ci_pointers(path, required)
+    failed = [k for k in required if verdicts.get(k) != "pass"]
     if v["CI"] == "merge-ok":
+        problems += ptr_problems
+        if failed: problems.append(f"HIGH-LEVEL/llm-judge not passed with verified pointer: {','.join(failed)}")
         if not fz: problems.append("freeze mismatch")
         if v["STAGE_A"] != "pass" or not stage_a_ok: problems.append("Stage A not pass on record")
         if v["PROCESS"] != "pass": problems.append("process fail")
         if v["OUTCOME"] != "pass": problems.append("outcome fail")
         if v["STAGE_B"] == "fail": problems.append("Stage B fail")
         if v["UNMET"].strip().lower() not in ("none", "", "-"): problems.append(f"UNMET non-empty: {v['UNMET']}")
-        if len(v["EVIDENCE"].strip()) < 20: problems.append("EVIDENCE too thin")
     if problems:
         die("CI.md claims merge-ok but: " + "; ".join(problems) + " -> reject")
     print(f"CI: {v['CI']}")

@@ -36,11 +36,13 @@ Apply when **any** of: the change touches ≥3 files; a new test is needed; the 
 scripts/nid_check.py # bundled with this skill; hashed into FREEZE
 ```
 
-`PLAN.md` must contain:
+`PLAN.md` must contain (the checker parses all of it):
 
-- One line per independently required outcome of the **current** request (one leaf = one deliverable).
+- `R1..Rn`: the user request decomposed into **atomic requirement clauses**. Every gate names the Rs it observes (`COVERS:`); every R must be covered by ≥1 gate; a gate covering nothing is refused. This is the traceability matrix — it catches "half the request never reached an oracle".
+- `H1..Hn`: outcomes no CHECK can observe, in **falsifiable form**:
+  `H1: no credentials in the diff | FALSIFIER: a string shaped like an API token appears in the diff`
+  A FALSIFIER that is a command (`$ …`, or starts with grep/curl/git/npm/…) is **refused** — that is a runnable gate, move it to `KIND: cmd`. Vague phrases ("looks good", "works correctly") are refused. What survives is the small set Stage B genuinely has to judge.
 - `SETUP:` commands a clean checkout needs before Stage A (`npm ci`, `pip install -e .`, build).
-- `HIGH-LEVEL` outcomes `H1..Hn`: things no CHECK can observe (game rules hold, no secrets in the diff, UI state). Each must be specific, non-overlapping, and point to an inspectable artifact. "Covers the feature" / "looks good" are forbidden.
 - Caps: `max_iterations: 8`, `stall_iters: 3`, `max_ci_attempts: 3`.
 
 ## 3. Gate contract (checker enforces every line)
@@ -55,6 +57,7 @@ scripts/nid_check.py # bundled with this skill; hashed into FREEZE
   FILES: tests/pricing.spec.ts, fixtures/pricing.json   # frozen with the ledger
   KIND: cmd         # or llm-judge (no CHECK; graded only in CI Stage B)
   RED: required     # or pass-ok, only for regression gates that already pass
+  COVERS: R1, R3    # requirement clauses from PLAN.md this gate observes
 ```
 
 **Match rule:** stdout+stderr combined; the **last non-empty line** must equal EXPECT (or fullmatch the regex). Print the marker after all asserts so a partial run cannot match.
@@ -82,7 +85,11 @@ Runs after `ALL MET`, in a **new worktree / clean checkout**, empty conversation
 
 **Stage A (no LLM judgment):** run `SETUP`, then `python scripts/nid_check.py --run .no-illusory-done/LEDGER.md`. Exit ≠ 0 → write `CI: reject` with the UNMET ids and stop; do not grade.
 
-**Stage B (LLM, tools allowed, read-only on code/oracles):** grade **only** `H1..Hn` and any `KIND: llm-judge` gates. Per criterion: `pass|fail` + a pointer (path, command, snippet from **this** run). Split:
+**Stage B (LLM, tools allowed, read-only on code/oracles):** grade **only** `H1..Hn` and any `KIND: llm-judge` gates, each against its FALSIFIER. A `pass` requires a **machine-verifiable pointer**:
+- `Hn: pass @ path[:L1[-L2]] sha=<≥12 hex>` — sha256 of the file (or of exactly those lines, joined by `\n`). `--ci` rehashes it; mismatch = you did not read this version.
+- `Hn: pass $ <command> sha=<≥12 hex>` — sha256 of the command's stdout+stderr. `--ci` reruns it; mismatch = you did not run it.
+- `Hn: fail <free text>` needs no pointer.
+A pass without a pointer, or with a stale one, is downgraded to fail and the CI verdict to reject. Split:
 - `PROCESS`: hooks ran, no skipped suite, no flaky flags in `last-run.json`, environment was sane.
 - `OUTCOME`: would the user consider the requested state true?
 Uncontrollable env failure (login wall, missing secret) = `PROCESS: pass`, `OUTCOME: fail`, `CI: inconclusive`. No affirmation from memory.
@@ -96,7 +103,10 @@ STAGE_B: pass | fail | skipped
 PROCESS: pass | fail
 OUTCOME: pass | fail
 UNMET: none | G3,H2
-EVIDENCE: H1 → path:line / command → snippet; H2 → ...
+EVIDENCE:
+H1: pass @ src/pricing.ts:41-58 sha=3f9a1c0e77b2
+H2: pass $ git diff main --stat sha=b81d0c4e55aa
+H3: fail tier badge missing on /pricing (screenshot evidence/h3.png)
 ```
 
 Then `python scripts/nid_check.py --ci .no-illusory-done/CI.md`. It exits 0 only if `merge-ok` is consistent with the on-disk Stage A record and the freeze. An inconsistent `merge-ok` is downgraded to reject.
@@ -149,6 +159,6 @@ Paste its output verbatim. Do not hand-write a `VERDICT:` line. Mark host todos 
 ## 9. What this skill does not claim
 
 - It cannot stop an agent that never loads it, or that deletes `.no-illusory-done/`. Git history will show that.
-- The CHECK blacklist is bypassable; `--red` is the real guard, and a vacuous test under a vague spec still passes `--red`. Tighten the spec or HANDOFF.
-- Stage B is an LLM. Vague HIGH-LEVEL lines get gamed; `--ci` only checks form, not truth.
+- The CHECK blacklist is bypassable; `--red` is the real guard. A vacuous test can still pass `--red` and still claim `COVERS: R1` — traceability catches omitted requirements, not lying ones. A mutation pass (`--mutate`: fail on near-miss implementations) is the next guard and is not implemented yet.
+- Stage B is an LLM. Pointer verification proves the grader **read this file / ran this command**, not that it reasoned correctly about it. FALSIFIER lines shrink the judgment surface; they do not remove it.
 - Human review and host CI remain the right bound for auth, payments, and production merges.
