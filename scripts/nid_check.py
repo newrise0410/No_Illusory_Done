@@ -481,7 +481,7 @@ def cmd_red(ctx: Ctx, supersede: str | None = None) -> None:
         prev = git(ctx, "log", "-1", "--format=%h", "--", ctx.rel(ctx.freeze)).stdout.strip() or "uncommitted"
         sup.append(f"{len(sup) + 1} prev={prev} {supersede.strip()}")
     bad, reds = [], []
-    head_tracked = set(git(ctx, "ls-tree", "-r", "--name-only", "HEAD").stdout.split())
+    head_tracked = set(x for x in git(ctx, "-c", "core.quotePath=false", "ls-tree", "-r", "--name-only", "-z", "HEAD").stdout.split("\0") if x)
     for g in gates:
         if g.kind != "cmd": continue
         r = run_gate(ctx, g, record=False)
@@ -781,9 +781,11 @@ class Mutator(ast.NodeTransformer):
 
 def changed_files(ctx: Ctx, since: str) -> list[str]:
     """Committed-since-freeze + uncommitted + untracked."""
-    out = git(ctx, "diff", "--name-only", since, "HEAD", "--").stdout.split()
-    out += git(ctx, "diff", "--name-only", "HEAD", "--").stdout.split()
-    out += git(ctx, "ls-files", "--others", "--exclude-standard").stdout.split()
+    def z(*args):
+        return [x for x in git(ctx, "-c", "core.quotePath=false", *args, "-z").stdout.split("\0") if x]
+    out = z("diff", "--name-only", since, "HEAD", "--")
+    out += z("diff", "--name-only", "HEAD", "--")
+    out += z("ls-files", "--others", "--exclude-standard")
     return sorted(set(out))
 
 
