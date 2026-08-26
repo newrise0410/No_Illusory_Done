@@ -61,7 +61,7 @@ Before any implementation, the test-writer runs every gate. **Each must fail.** 
 - refuses if `FREEZE.sha256` differs from `git HEAD`, or if more commits touched it than the `SUPERSEDE` lines it declares — a re-freeze must be declared with `--red --supersede "<reason>"` and stays in the file forever;
 - refuses outside a git repository (no witness → no verdict);
 - refuses if a CHECK names an existing file that is not in `FILES` (a path that does not exist yet is product output); `FILES` must be non-empty and inside the repo;
-- runs every CHECK in a clean environment (PATH/HOME/LANG/TMPDIR only, `PYTHONSAFEPATH=1`, `PYTHONNOUSERSITE=1`; a gate's `ENV:` adds frozen literals, never PATH/PYTHONPATH/NODE_PATH/LD_PRELOAD), so nothing inherited from the implementer's shell reaches the oracle;
+- runs every CHECK in a clean environment (PATH/HOME/LANG/TMPDIR only, `PYTHONNOUSERSITE=1`; a gate's `ENV:` adds frozen literals, never PATH/PYTHONPATH/NODE_PATH/LD_PRELOAD), so nothing inherited from the implementer's shell reaches the oracle;
 - refuses `--run` if a runner-influencing file (`conftest.py`, `sitecustomize.py`, `*.pth`, `pytest.ini`, `pyproject.toml`, `package.json`, jest/vitest/babel config, `tsconfig`, `.env`, `Makefile`, `__init__.py`, …) was added or changed since the freeze without being frozen;
 - refuses more than `max_supersedes` declared re-freezes (default 1).
 

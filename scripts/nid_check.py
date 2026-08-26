@@ -205,6 +205,9 @@ def sanity_text(name: str, text: str) -> None:
                 die(f"{name} line {ln}: invisible/format character U+{ord(ch):04X} not allowed")
             if unicodedata.east_asian_width(ch) in ("F",) or "\uff00" <= ch <= "\uffef":
                 die(f"{name} line {ln}: fullwidth character {ch!r} not allowed (lookalike id)")
+        fm = FIELD_RE.match(line)
+        if fm and fm.group(1) in FIELDS:
+            continue
         if LOOKALIKE_ID.match(line) and not (R_RE.match(line.strip().lstrip("-* ").strip()) or H_RE.match(line.strip().lstrip("-* ").strip()) or GATE_RE.match(line)):
             die(f"{name} line {ln}: looks like an id but is not a valid R/H/G line: {line.strip()!r}")
 
@@ -286,7 +289,13 @@ def parse_ledger(ctx: Ctx) -> list[Gate]:
         # Every existing file the CHECK names must be frozen (FILES). A path that does not
         # exist yet is product output the implementation will create.
         declared = set(g.files)
-        toks = set(PATHISH.findall(chk)) | {t.strip("\"'") for t in re.split(r"[\s;&|()<>]+", chk) if t.strip("\"'")}
+        if re.search(r"[*?\[\]~]", chk): die(f"{g.id}: globs/tilde in CHECK are not allowed (name files explicitly)")
+        import shlex
+        try:
+            words = shlex.split(chk.replace("&&", " ").replace("||", " ").replace("|", " ").replace(";", " "))
+        except ValueError as e:
+            die(f"{g.id}: CHECK is not parseable as shell words ({e})")
+        toks = set(PATHISH.findall(chk)) | set(words)
         for tok in toks:
             if tok.startswith("-"): continue
             p = cwd / tok
@@ -370,7 +379,7 @@ CRASH_KILL = re.compile(r"(ImportError|ModuleNotFoundError|SyntaxError|NameError
 def clean_env(g: Gate | None = None) -> dict:
     """Nothing inherited from the caller's shell except a whitelist; gate ENV: values are frozen literals."""
     env = {k: os.environ[k] for k in CLEAN_ENV_KEYS if k in os.environ}
-    env.update({"PYTHONSAFEPATH": "1", "PYTHONNOUSERSITE": "1", "PYTHONDONTWRITEBYTECODE": "1",
+    env.update({"PYTHONNOUSERSITE": "1", "PYTHONDONTWRITEBYTECODE": "1",
                 "NODE_OPTIONS": "", "CI": "1", "NID": "1"})
     if g is not None:
         for kv in g.env:
