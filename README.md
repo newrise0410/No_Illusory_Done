@@ -1,11 +1,29 @@
 # No Illusory Done
 
+[![checker](https://github.com/newrise0410/No_Illusory_Done/actions/workflows/ci.yml/badge.svg)](https://github.com/newrise0410/No_Illusory_Done/actions/workflows/ci.yml)
+
 **Done is a checker verdict, not a sentence.**
 
-A completion-discipline skill for coding agents (Claude Code, Codex, or any agent that can run shell commands), plus a small Python checker that makes "done" a state on disk rather than a claim in chat.
+A completion-discipline skill for coding agents (Claude Code, Codex, or any agent that can run shell commands), plus a single-file Python checker (stdlib only, needs `git` and `bash`) that makes "done" a state on disk rather than a claim in chat.
 
-- [`SKILL.md`](SKILL.md) — the skill: roles, artifacts, gate contract, stop hook
-- [`scripts/nid_check.py`](scripts/nid_check.py) — the checker (`--status`, `--red`, `--run`, `--ci`, `--report`, …)
+| | |
+|---|---|
+| [`SKILL.md`](SKILL.md) | the skill: roles, artifacts, gate contract, stop hook |
+| [`scripts/nid_check.py`](scripts/nid_check.py) | the checker: `--status`, `--red`, `--run`, `--mutate`, `--ci`, `--report`, `--verify-freeze`, `--hook` |
+| [`tests/test_nid_check.py`](tests/test_nid_check.py) | 54 cases against real git fixtures: happy path, every refusal rule, every bypass from six adversarial review rounds, every doc example |
+| [`.no-illusory-done/`](.no-illusory-done/) | this repository's own frozen ledger — CI dogfoods the checker on every push |
+
+**Quick start** (lite mode, the default):
+
+```bash
+cp scripts/nid_check.py <repo>/scripts/
+# write .no-illusory-done/PLAN.md (R clauses, PRODUCT) and LEDGER.md (gates), plus failing tests — see §5.3
+python3 scripts/nid_check.py --red .no-illusory-done/LEDGER.md    # every gate must fail; writes FREEZE.sha256
+git add -A && git commit -m "nid: freeze" && git push               # the freeze needs a remote witness
+# ...implement...
+python3 scripts/nid_check.py --run .no-illusory-done/LEDGER.md    # ALL MET is the claim
+python3 scripts/nid_check.py --report                             # VERDICT: merge-ok is the only "done"
+```
 
 ---
 
@@ -47,11 +65,11 @@ Everything in the skill is a mechanism for making these three principles hard to
   COVERS: R1, R3
 ```
 
-The checker refuses gates that observe nothing: titles that are activities ("run tests"), `echo`/`printf`/`true`/`exit 0`/`--passWithNoTests`, a CHECK that contains its own EXPECT. The blacklist is a convenience; the real guard is the next mechanism.
+The checker refuses gates that observe nothing: titles that are activities ("run tests"), `exit 0`, `--passWithNoTests`, redirection, a CHECK that contains its own EXPECT — and, under `strictness: strict` (§3.10), the whole shell-syntax class (`echo`, `||`, `$`, control flow). The blacklist is a convenience; the real guards are the next mechanisms.
 
 ### 3.2 RED before code (`--red`)
 
-Before any implementation, the test-writer runs every gate. **Each must fail.** A gate that passes before the code exists observes nothing about the code (or is a regression gate: `RED: pass-ok`, allowed only when its `FILES` were already tracked in git). `--red` is the only command that writes `FREEZE.sha256`; `--run` refuses any gate without a RED record. This proves the oracle *failed* at time zero — not that it failed for the right reason (see §6).
+Before any implementation, the test-writer runs every gate. **Each must fail.** A gate that passes before the code exists observes nothing about the code (or is a regression gate: `RED: pass-ok`, allowed only when its `FILES` were already tracked in git). `--red` is the only command that writes `FREEZE.sha256`; `--run` refuses any gate without a RED record. This proves the oracle *failed* at time zero — not that it failed for the right reason (see §7).
 
 ### 3.3 Freeze (replaces "human approves the tests")
 
@@ -64,9 +82,10 @@ Before any implementation, the test-writer runs every gate. **Each must fail.** 
 - refuses if any file **outside `PRODUCT:`** (declared in the frozen `PLAN.md`) changed since the freeze — a loader hook, a post-freeze symlink, a `bin/`, a test helper — the implementer may write only the product (`EXPECTED_NEW:` for product files that carry a runner-config name);
 - runs every CHECK in a clean environment: PATH with relative and repo-internal entries removed, HOME/LANG/TMPDIR, toolchain homes only when outside the repo, `PYTHONNOUSERSITE=1`, npm/pip/git user config at `/dev/null`; a gate's `ENV:` adds frozen literals, never PATH/PYTHONPATH/NODE_PATH/LD_PRELOAD. "Clean" means *the implementer's shell cannot reach the oracle*, not hermetic — a toolchain inside the checkout will not be found;
 - refuses `--run` if a runner-influencing file (`conftest.py`, `sitecustomize.py`, `*.pth`, `pytest.ini`, `pyproject.toml`, `package.json`, jest/vitest/babel config, `tsconfig`, `.env`, `Makefile`, `__init__.py`, …) was added or changed since the freeze without being frozen or declared in `PLAN.md` `EXPECTED_NEW:`;
-- refuses more than `max_supersedes` declared re-freezes (default 1).
+- refuses more than `max_supersedes` declared re-freezes (default 3);
+- with a remote configured, refuses unless the freeze commit is reachable from a ref the remote *actually* reports (`git ls-remote`; local tracking refs, `git replace`, shallow clones and grafts are all ignored or refused). `witness: local` opts out for offline work.
 
-What git cannot witness — history rewrite, force-push — is outside the checker.
+What the remote cannot witness — a force-push to the remote itself — is outside the checker.
 
 ### 3.4 Traceability (R clauses and `COVERS:`)
 
@@ -94,7 +113,7 @@ H2: pass $ git diff main --stat sha=b81d0c4e55aa     # sha256 of that command's 
 H3: fail tier badge missing on /pricing
 ```
 
-`--ci` first re-runs Stage A and `--mutate` itself (it never trusts a recorded result), then rehashes each file range or reruns each command. The pointer must be exactly one of the H line's `SUBJECT` entries; the command must exit 0 and produce output; a gate that passed only on retry is a process failure. Any of these downgrades the verdict to reject. This proves the grader cited the real artifact in its current state — not that it reasoned correctly about it.
+`--ci` first re-runs Stage A and `--mutate` itself (it never trusts a recorded result), then rehashes each file range or reruns each command. The pointer must be exactly one of the H line's `SUBJECT` entries, must be a non-frozen file changed since the freeze, and a command must exit 0, produce output and change nothing (the repo is snapshotted before and after). Any of these downgrades the verdict to reject. `--ci` also runs the plan's `SETUP:` lines first (which may only touch gitignored paths) and counts rejected attempts against `max_ci_attempts`. This proves the grader cited the real artifact in its current state — not that it reasoned correctly about it.
 
 ### 3.7 Machine-generated verdict and stop hook
 
@@ -176,10 +195,9 @@ PRODUCT: src
 mutation_required: 0     # TypeScript project: python mutation cannot apply
 
 H1: tier order matches marketing spec (Basic, Pro, Team) | FALSIFIER: any other order or a fourth card is visible on /pricing | SUBJECT: src/pages/pricing.tsx
-max_supersedes: 1
-max_gates_per_r: 4
 
-SETUP: npm ci
+SETUP: npm ci            # run by --ci in the clean env; may only write gitignored paths
+strictness: strict       # this is CI-gated work; see §3.10 for what lite drops
 max_iterations: 8
 stall_iters: 3
 max_ci_attempts: 3
@@ -231,12 +249,11 @@ Repeat until `ALL MET`. The checker updates the `E` column, `iteration`, and `st
 
 ```bash
 git worktree add ../nid-ci HEAD && cd ../nid-ci
-npm ci                                                           # SETUP from PLAN.md
-python3 scripts/nid_check.py --run .no-illusory-done/LEDGER.md      # Stage A; exit != 0 -> reject, stop
+python3 scripts/nid_check.py --run .no-illusory-done/LEDGER.md      # Stage A preview; exit != 0 -> reject, stop
 python3 scripts/nid_check.py --mutate .no-illusory-done/LEDGER.md   # survivors -> VACUOUS ORACLE -> reject
 ```
 
-Stage B grades H1 with a pointer, then writes `CI.md`:
+(`--ci` below repeats both itself, after running `SETUP:`; nothing recorded here is trusted.) Stage B grades H1 with a pointer, then writes `CI.md`:
 
 ```text
 CI: merge-ok
@@ -269,11 +286,31 @@ python3 scripts/nid_check.py --report                       # paste verbatim; "d
 
 Gate fields: `CHECK` (run under `bash -o errexit -o pipefail -o nounset` in a clean env), `EXPECT` (literal ≥3 chars or a `/regex/` with ≥3 literal alphanumerics that matches none of the failure probes, **last non-empty line** of stdout+stderr), `CWD`, `TIMEOUT` (300 s), `FILES` (frozen, non-empty), `ENV` (frozen literal `KEY=value` list), `KIND` (`cmd` | `llm-judge`; judges may not outnumber runnable gates), `RED` (`required` | `pass-ok`), `COVERS` (every R needs a runnable gate). No `RETRIES`: a flaky oracle is refused.
 
-### 5.5 Artifacts
+### 5.5 PLAN.md reference
+
+| Line | Meaning | Default |
+|---|---|---|
+| `Rn: <clause>` | atomic requirement; every R needs a runnable gate | required |
+| `Hn: <state> \| FALSIFIER: <prose> \| SUBJECT: <code file>, $ <command>` | outcome graded by LLM CI; pointer targets | optional |
+| `PRODUCT: <paths>` | the only paths the implementer may change after the freeze | required |
+| `EXPECTED_NEW: <files>` | product files with runner-config names the implementation will create | — |
+| `SETUP: <cmd>` | run by `--ci` before Stage A; may only write gitignored paths | — |
+| `strictness: lite\|strict` | shell-syntax bans + mutation requirement | `lite` |
+| `witness: remote\|local` | query the remote for the freeze commit, or trust local history | `remote` |
+| `regression_only: 0\|1` | allow a ledger where every gate is `RED: pass-ok` | `0` |
+| `mutation_required: 0\|1` | waive the "no python changed" case only | `0` (lite) / `1` (strict) |
+| `MUTATE: <cmd>` + `MUTATE_EXPECT: <marker>` | external mutation tool as the verdict | — |
+| `max_iterations` / `stall_iters` | implementer caps → `HANDOFF REQUIRED` (exit 3) | 8 / 3 |
+| `max_ci_attempts` | rejected `--ci` runs before handoff | 3 |
+| `max_supersedes` | declared re-freezes before a human must intervene | 3 |
+| `max_gates_per_r` | traceability dilution bound | 4 |
+| `max_mutants_per_file` | 0 = all; a cap makes mutation `inconclusive`, never `pass` | 0 |
+
+### 5.6 Artifacts
 
 ```text
 .no-illusory-done/
-  PLAN.md            R clauses, H lines with FALSIFIER, SETUP, caps
+  PLAN.md            R/H lines, PRODUCT, SETUP, modes, caps (frozen)
   LEDGER.md          gates (frozen)
   FREEZE.sha256      file hashes + RED records + SUPERSEDE log (checker-written, committed once)
   STATE.md           E column checker-owned, B column implementer-owned — output only, never evidence
@@ -283,7 +320,14 @@ Gate fields: `CHECK` (run under `bash -o errexit -o pipefail -o nounset` in a cl
 
 ## 6. Testing the checker
 
-`python3 -m unittest discover -s tests -v` — four layers against real git fixture repos: the happy path in both modes, one case per refusal rule, every bypass found in six adversarial review rounds (each must stay refused), and every `CHECK:` example in this README and SKILL.md run through the checker's own rules plus the bash `errexit` semantics they rely on. GitHub Actions runs it on Ubuntu and macOS, then **dogfoods**: this repository carries its own `.no-illusory-done/` ledger (regression-only, strict), and CI runs `--verify-freeze` and `--run` on every push.
+`python3 -m unittest discover -s tests -v` — four layers against real git fixture repos (temp dir, bare remote, no mocks):
+
+1. **happy path** in lite and strict: `status → hook → red → run(RED) → run(GREEN) → mutate → ci → report → hook`, plus caps, supersede, `EXPECTED_NEW`/`SETUP`, `regression_only`, the external `MUTATE:` hook;
+2. **one case per refusal rule**, asserting the exact refusal text;
+3. **red team**: every bypass found in six adversarial review rounds (forged evidence, mid-run freeze mutation, `CI.md` written by product code, re-hash-and-commit, shallow clone, `git replace`, forged tracking refs, env/`PYTHONPATH`, repo-internal `PATH`, influence files, loader hooks, symlinks, ignored python, alternate ledgers, `STATE.md` forgery, mutating pointer commands, product-writing `SETUP`, control-flow masking, llm-judge ratios, output cap, path-prefix confusion) — each must stay refused;
+4. **documentation**: every `CHECK:` in this README and SKILL.md is run through the checker's own rules, the walkthrough's PLAN/LEDGER blocks are parsed with `--status`, and the `errexit` semantics the negative-check example relies on are executed in bash. This layer caught a README example that the checker itself refused.
+
+GitHub Actions runs the suite on Ubuntu and macOS (Python 3.11/3.12), then **dogfoods**: this repository carries its own `.no-illusory-done/` ledger (`PRODUCT: scripts`, strict, regression-only, mutation waived explicitly in the frozen plan), and CI runs `--verify-freeze` (witnessed by `origin`) and `--run` on every push. The friction is real and intended: any change outside `PRODUCT` — this README included — fails the dogfood job until the ledger is re-frozen with `--red --supersede "<reason>"`, which is recorded permanently.
 
 ## 7. What this does not solve
 
