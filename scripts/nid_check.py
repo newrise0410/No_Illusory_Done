@@ -906,11 +906,19 @@ def check_ci_pointers(ctx: Ctx, highs: dict, judge_ids: list[str]):
 def run_setup(ctx: Ctx) -> None:
     """SETUP: lines from the frozen PLAN, run in the clean env before Stage A (clean checkout needs deps)."""
     _, _, setup, _ = parse_plan(ctx)
+    if not setup: return
+    def state():
+        return {f: (sha_file(ctx.root / f) if (ctx.root / f).is_file() else None) for f in changed_files(ctx, "HEAD")}, nid_snapshot(ctx)
+    before = state()
     for cmd in setup:
         r = subprocess.run(["bash", "-o", "errexit", "-o", "pipefail", "-c", cmd], cwd=str(ctx.root), timeout=3600,
                            stdout=subprocess.PIPE, stderr=subprocess.STDOUT, env=clean_env())
         if r.returncode != 0:
             die(f"SETUP failed ({cmd!r}, exit {r.returncode}):\n" + r.stdout.decode("utf-8", "replace")[-2000:])
+    after = state()
+    if before != after:
+        diff = sorted(set(before[0]) ^ set(after[0]) | {k for k in before[0] if k in after[0] and before[0][k] != after[0][k]})
+        die(f"SETUP changed non-ignored files ({', '.join(diff[:10]) or 'checker files'}): setup may only install dependencies into gitignored paths, never touch product or tests")
 
 
 def ci_verdict(ctx: Ctx) -> tuple[str, list[str]]:
