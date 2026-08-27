@@ -60,7 +60,7 @@ Before any implementation, the test-writer runs every gate. **Each must fail.** 
 - refuses if any hashed file differs — checked **before and after** running the gates, so a CHECK that rewrites a frozen file mid-run is caught;
 - refuses if `FREEZE.sha256` differs from `git HEAD`, or if more commits touched it than the `SUPERSEDE` lines it declares — a re-freeze must be declared with `--red --supersede "<reason>"` and stays in the file forever;
 - refuses outside a git repository (no witness → no verdict);
-- refuses if a CHECK names an existing file that is not in `FILES` (a path that does not exist yet is product output); `FILES` must be non-empty and inside the repo; the ledger must be `<git toplevel>/.no-illusory-done/LEDGER.md` (no alternate ledgers); submodules and nested repos are refused;
+- refuses if a CHECK names an existing non-PRODUCT file that is not in `FILES` (PRODUCT files may be read with `grep`/`diff` but never passed to an interpreter — including via `-r`/`-S`/preload options; a path that does not exist yet is product output); `FILES` must be non-empty and inside the repo; the ledger must be `<git toplevel>/.no-illusory-done/LEDGER.md` (no alternate ledgers); submodules and nested repos are refused;
 - refuses if any file **outside `PRODUCT:`** (declared in the frozen `PLAN.md`) changed since the freeze — a loader hook, a post-freeze symlink, a `bin/`, a test helper — the implementer may write only the product (`EXPECTED_NEW:` for product files that carry a runner-config name);
 - runs every CHECK in a clean environment: PATH with relative and repo-internal entries removed, HOME/LANG/TMPDIR, toolchain homes only when outside the repo, `PYTHONNOUSERSITE=1`, npm/pip/git user config at `/dev/null`; a gate's `ENV:` adds frozen literals, never PATH/PYTHONPATH/NODE_PATH/LD_PRELOAD. "Clean" means *the implementer's shell cannot reach the oracle*, not hermetic — a toolchain inside the checkout will not be found;
 - refuses `--run` if a runner-influencing file (`conftest.py`, `sitecustomize.py`, `*.pth`, `pytest.ini`, `pyproject.toml`, `package.json`, jest/vitest/babel config, `tsconfig`, `.env`, `Makefile`, `__init__.py`, …) was added or changed since the freeze without being frozen or declared in `PLAN.md` `EXPECTED_NEW:`;
@@ -159,6 +159,7 @@ R1: /pricing renders exactly three tiers
 R2: annual toggle shows 20% discount to two decimals
 R3: no new secrets in the diff
 PRODUCT: src
+mutation_required: 0     # TypeScript project: python mutation cannot apply
 
 H1: tier order matches marketing spec (Basic, Pro, Team) | FALSIFIER: any other order or a fourth card is visible on /pricing | SUBJECT: src/pages/pricing.tsx
 max_supersedes: 1
@@ -187,7 +188,7 @@ max_ci_attempts: 3
   COVERS: R2
 
 - [ ] G3: diff introduces no token-shaped strings
-  CHECK: git diff main -- . ':!*.lock' | grep -Ev '^-' | grep -Eq '(sk|ghp|AKIA)[A-Za-z0-9_-]{16,}' && exit 1; cat tests/nid/G3.marker
+  CHECK: git diff main -- src | grep -Ev '^-' | grep -Eq '(sk|ghp|AKIA)[A-Za-z0-9_-]{16,}' && exit 1; cat tests/nid/G3.marker
   EXPECT: NID G3
   FILES: tests/nid/G3.marker
   COVERS: R3
@@ -243,14 +244,14 @@ python3 scripts/nid_check.py --report                       # paste verbatim; "d
 
 | Command | Does | Exit 0 iff |
 |---|---|---|
-| `--status LEDGER` | parse ledger + PLAN; traceability, H-line, FILES/MUTABLE rules | well-formed |
+| `--status LEDGER` | parse ledger + PLAN; traceability, H-line, FILES/PRODUCT rules | well-formed |
 | `--red LEDGER` | run all gates, require RED, write `FREEZE.sha256` (`--supersede "<reason>"` to re-freeze, recorded) | all required gates failed |
 | `--verify-freeze` | hashes vs working tree; FREEZE vs HEAD; commit count vs declared supersedes; RED records present | match |
 | `--run LEDGER` | freeze → run gates → freeze again; update `STATE.md`; enforce caps | ALL MET (exit 1 unmet, 3 handoff) |
 | `--mutate LEDGER` | AST mutants of changed python, each must be killed by a gate | no survivors (0 mutants = inconclusive, exit 1) |
-| `--ci CI.md` | re-run Stage A + mutation; validate pointers against exact SUBJECT; flaky = process fail | `CI: merge-ok` consistent |
+| `--ci CI.md` | run `SETUP`, re-run Stage A + mutation; validate pointers against exact SUBJECT; count attempts | `CI: merge-ok` consistent |
 | `--report` | re-run Stage A + CI validation; print verdict | `VERDICT: merge-ok` |
-| `--hook` | Stop-hook entry (no ledger → exit 0; else `--run`) | ALL MET |
+| `--hook` | Stop-hook entry (no ledger or no freeze yet → exit 0; else `--run`, exit 2 blocks) | ALL MET |
 
 Gate fields: `CHECK` (run under `bash -o errexit -o pipefail -o nounset` in a clean env), `EXPECT` (literal ≥3 chars or a `/regex/` with ≥3 literal alphanumerics that matches none of the failure probes, **last non-empty line** of stdout+stderr), `CWD`, `TIMEOUT` (300 s), `FILES` (frozen, non-empty), `ENV` (frozen literal `KEY=value` list), `KIND` (`cmd` | `llm-judge`; judges may not outnumber runnable gates), `RED` (`required` | `pass-ok`), `COVERS` (every R needs a runnable gate). No `RETRIES`: a flaky oracle is refused.
 

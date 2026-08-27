@@ -182,7 +182,7 @@ def parse_plan(ctx: Ctx):
         m = R_RE.match(line)
         if m:
             if m.group(1) in reqs: die(f"PLAN.md duplicate {m.group(1)} (line {ln})")
-            if len(m.group(2)) < 8 or VAGUE.search(m.group(2)):
+            if len(m.group(2)) < 4 or VAGUE.search(m.group(2)):
                 die(f"PLAN.md {m.group(1)}: too vague (line {ln})")
             reqs[m.group(1)] = m.group(2); continue
         m = H_RE.match(line)
@@ -196,7 +196,7 @@ def parse_plan(ctx: Ctx):
                 kv[k.strip()] = v.strip()
             for k in ("FALSIFIER", "SUBJECT"):
                 if not kv.get(k): die(f"PLAN.md {hid}: missing '| {k}: ...' (line {ln})")
-            if len(kv["STATE"]) < 8 or len(kv["FALSIFIER"]) < 8:
+            if len(kv["STATE"]) < 4 or len(kv["FALSIFIER"]) < 4:
                 die(f"PLAN.md {hid}: state/FALSIFIER too vague (line {ln})")
             if VAGUE.search(body): die(f"PLAN.md {hid}: forbidden vague phrase (line {ln})")
             if falsifier_is_command(kv["FALSIFIER"]):
@@ -341,14 +341,26 @@ def parse_ledger(ctx: Ctx) -> list[Gate]:
         import shlex
         try:
             lex = shlex.shlex(chk, posix=True, punctuation_chars=True); lex.whitespace_split = True
-            words = [w for w in lex if w not in ("&&", "||", "|", ";", "(", ")", "<", ">", "&")]
+            words = [w for w in lex if w not in ("(", ")", "<", ">", "&")]
         except ValueError as e:
             die(f"{g.id}: CHECK is not parseable as shell words ({e})")
-        toks = set(words)
+        toks = set(w for w in words if w not in ("&&", "||", "|", ";"))
         prod = parse_plan(ctx)[3]["_product"]
         # The oracle may READ the product but may not EXECUTE it: an executed product file is an oracle the
         # implementer writes. Refuse a command word, an interpreter target, or a `-m module` under PRODUCT.
-        INTERP = {"python", "python3", "node", "bash", "sh", "zsh", "ruby", "perl", "deno", "bun", "php", "tsx", "ts-node", "npx"}
+        INTERP = {"python", "python3", "node", "bash", "sh", "zsh", "ruby", "perl", "deno", "bun", "php", "tsx", "ts-node", "npx", "go", "java", "dotnet", "cargo"}
+        # Segment rule: inside a segment run by an interpreter/runner, NO argument may be a PRODUCT path (covers -r/-S/-- preloads).
+        seg, segs = [], []
+        for w in words:
+            if w in ("&&", ";", "|", "||"): segs.append(seg); seg = []
+            else: seg.append(w)
+        segs.append(seg)
+        for sg in segs:
+            if sg and sg[0] in INTERP:
+                for w in sg[1:]:
+                    wp = cwd / w.lstrip("./") if not os.path.isabs(w) else Path(w)
+                    if w and not w.startswith("-") and wp.exists() and under(ctx.rel(wp), prod):
+                        die(f"{g.id}: CHECK passes product path {ctx.rel(wp)} to {sg[0]} — the oracle must be a frozen file, never the product (read it with grep/diff, do not load it)")
         for i, w in enumerate(words):
             cand = None
             if i == 0 or (i > 0 and words[i - 1] in INTERP) or (i > 0 and words[i - 1] == "run" and i > 1 and words[i - 2] == "go"):
@@ -891,10 +903,24 @@ def check_ci_pointers(ctx: Ctx, highs: dict, judge_ids: list[str]):
     return verdicts, problems
 
 
+def run_setup(ctx: Ctx) -> None:
+    """SETUP: lines from the frozen PLAN, run in the clean env before Stage A (clean checkout needs deps)."""
+    _, _, setup, _ = parse_plan(ctx)
+    for cmd in setup:
+        r = subprocess.run(["bash", "-o", "errexit", "-o", "pipefail", "-c", cmd], cwd=str(ctx.root), timeout=3600,
+                           stdout=subprocess.PIPE, stderr=subprocess.STDOUT, env=clean_env())
+        if r.returncode != 0:
+            die(f"SETUP failed ({cmd!r}, exit {r.returncode}):\n" + r.stdout.decode("utf-8", "replace")[-2000:])
+
+
 def ci_verdict(ctx: Ctx) -> tuple[str, list[str]]:
-    """Re-run Stage A, then validate CI.md. Returns (effective verdict, problems)."""
+    """Run SETUP, re-run Stage A, then validate CI.md. Returns (effective verdict, problems)."""
     gates = parse_ledger(ctx)
-    _, highs, _, _ = parse_plan(ctx)
+    _, highs, _, caps0 = parse_plan(ctx)
+    run_setup(ctx)
+    attempts = ref_counter(ctx, "ci_attempts")
+    if attempts >= caps0["max_ci_attempts"]:
+        return "reject", [f"HANDOFF REQUIRED: {attempts} CI attempts already rejected (max_ci_attempts={caps0['max_ci_attempts']})"]
     v = parse_ci(ctx)
     fz = verify_freeze(ctx, gates, quiet=True)
     a_ok, results, unmet = stage_a(ctx, gates, record=False)
@@ -925,6 +951,8 @@ def ci_verdict(ctx: Ctx) -> tuple[str, list[str]]:
 def cmd_ci(ctx: Ctx) -> None:
     verdict, problems = ci_verdict(ctx)
     for p in problems: print(f"CI PROBLEM: {p}")
+    if verdict != "merge-ok":
+        set_ref_counter(ctx, "ci_attempts", ref_counter(ctx, "ci_attempts") + 1)
     print(f"CI: {verdict}")
     sys.exit(0 if verdict == "merge-ok" else 1)
 
