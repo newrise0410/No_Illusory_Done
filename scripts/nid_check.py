@@ -406,7 +406,7 @@ def parse_ledger(ctx: Ctx) -> list[Gate]:
             if p.is_dir() and tok not in (".", "./") and not in_nid(ctx, p):
                 reld = ctx.rel(p)
                 if not under(reld, prod):
-                    inside = [ctx.rel(x) for x in p.rglob("*") if x.is_file()]
+                    inside = [ctx.rel(x) for x in p.rglob("*") if x.is_file() and not DEP_DIRS.search(ctx.rel(x))]
                     if any(x not in declared for x in inside):
                         die(f"{g.id}: CHECK names directory {reld} outside PRODUCT; every file under it must be in FILES (or name files explicitly)")
             if p.is_file() and not in_nid(ctx, p):
