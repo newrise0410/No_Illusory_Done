@@ -1,7 +1,8 @@
 56bade4a7f9bf1e12fb5af0ce3a9249041ecf129cec5e7f09129066b3e0fc86f  .no-illusory-done/LEDGER.md
-9c835865ba1a1564b6758ddc7b1b43b3464f3868457611b8a74cceb529b064fc  .no-illusory-done/PLAN.md
-b77ad9011b4df0071a97e0b5a8e3f8a399924fb416c1f8b0707f2deb0a5b8ae5  scripts/nid_check.py
+8dc8334b0766dc10339d5e9ac4d9d81753b88b72dab67af40511436e0240f1a2  .no-illusory-done/PLAN.md
+da901fbad9b4484934408b06941e69321df83627d5837dbda36e21dc3af6a2af  scripts/nid_check.py
 a2de7723749f736784fce22fe6980eee4bbb828644e4b2b8c4f923f22fbd5097  tests/nid/G1.marker
-076417d1d4cd03326f2dd2c44a711da36887dbe85b57005a21749264d04e2f57  tests/test_nid_check.py
-RED G1 22f9bf7059e70c9b4ce2634ef44c5b56d07dcefc0ce8251470f4918da71a236c 0
+6216f02a9d9fb10a1b7a2f4187b7d0a71353236ff48402efcea664d87f671a3b  tests/test_nid_check.py
+RED G1 e052a215f691ddef827d683f849334a95db493b31c2efd91bb30dc7e14b6b483 0
 SUPERSEDE 1 prev=b17abe0 README refreshed; PRODUCT widened to docs and CI config so documentation edits do not require re-freezing
+SUPERSEDE 2 prev=edce8b1 checker changed: marker-in-product guard and cache-dir exemption; dogfood max_supersedes raised because the checker is this repo's product
