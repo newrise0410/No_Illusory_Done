@@ -71,6 +71,7 @@ BAD_CHECK = [
     (re.compile(r"python[3]?\s+-c\b"), "python -c"),
     (re.compile(r"(^|\s)(touch|cp|mv|rm|tee|sed\s+-i)\s|[<>]"), "mutating command or redirection in CHECK"),
     (re.compile(r"[$`]|<<|(^|[;&|(]\s*)\w+=\S"), "shell expansion/heredoc/assignment (use a repo-owned script)"),
+    (re.compile(r"(^|[;&|(\s])(if|then|else|elif|fi|while|until|for|do|done|case|esac|function|select|!|\{|\}|\[\[|\[)(\s|$|;)"), "shell control flow (a gate is a straight && chain)"),
 ]
 
 
