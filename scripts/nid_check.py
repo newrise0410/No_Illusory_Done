@@ -946,7 +946,8 @@ def ci_verdict(ctx: Ctx) -> tuple[str, list[str]]:
     mut = mutation_verdict(ctx, gates)
     _, _, _, caps = parse_plan(ctx)
     if mut["status"] == "fail": problems.append(f"VACUOUS ORACLE: {len(mut['survivors'])} mutants survived: " + "; ".join(mut["survivors"][:5]))
-    mutation_inconclusive = mut["status"] == "inconclusive" and caps["mutation_required"]
+    # mutation_required: 0 waives ONLY "no python to mutate"; a capped or node-less python run is never waived.
+    mutation_inconclusive = mut["status"] == "inconclusive" and (caps["mutation_required"] or mut.get("reason") != "no-python")
     failed = [k for k in list(highs) + judge if verdicts.get(k) != "pass"]
     if v["CI"] != "merge-ok":
         return v["CI"], [f"mutation: {mut['status']}"] if mut["status"] != "pass" else []
@@ -960,7 +961,8 @@ def ci_verdict(ctx: Ctx) -> tuple[str, list[str]]:
     if failed: problems.append(f"criteria without verified pass: {','.join(failed)}")
     if problems: return "reject", problems
     if mutation_inconclusive:
-        return "inconclusive", [f"mutation inconclusive ({mut['note']}); set mutation_required: 0 in PLAN.md (frozen) to accept non-python changes without mutation"]
+        hint = "set mutation_required: 0 in PLAN.md (frozen) to accept non-python changes" if mut.get("reason") == "no-python" else "remove the mutant cap / make the python mutable — this cannot be waived"
+        return "inconclusive", [f"mutation inconclusive ({mut['note']}); {hint}"]
     return "merge-ok", []
 
 
@@ -1054,7 +1056,7 @@ def mutation_verdict(ctx: Ctx, gates: list[Gate], verbose=False) -> dict:
     changed = [f for f in changed_files(ctx, fcommit, include_ignored=True) if f.endswith(".py") and f not in frozen and not f.startswith("scripts/nid_check") and (ctx.root / f).is_file()]
     changed = sorted(set(changed))
     if not changed:
-        return {"status": "inconclusive", "survivors": [], "total": 0, "note": "no changed .py source since freeze (mutation v1: python only)"}
+        return {"status": "inconclusive", "reason": "no-python", "survivors": [], "total": 0, "note": "no changed .py source since freeze (mutation v1: python only)"}
     survivors, total, truncated = [], 0, []
     _, _, _, caps = parse_plan(ctx)
     cap = caps["max_mutants_per_file"]
@@ -1095,11 +1097,11 @@ def mutation_verdict(ctx: Ctx, gates: list[Gate], verbose=False) -> dict:
             if verbose: print(f"{f} #{i} {m.desc}: {'killed' if killed else ('SURVIVED (crash-only: import/syntax error, not an assertion)' if crash_only else 'SURVIVED')}")
             if not killed: survivors.append(f"{f}#{i} {m.desc}" + (" [crash-only]" if crash_only else ""))
     if total == 0:
-        return {"status": "inconclusive", "survivors": [], "total": 0, "note": "changed python has no mutable nodes"}
+        return {"status": "inconclusive", "reason": "no-mutable-nodes", "survivors": [], "total": 0, "note": "changed python has no mutable nodes"}
     if survivors:
         return {"status": "fail", "survivors": survivors, "total": total, "note": ""}
     if truncated:
-        return {"status": "inconclusive", "survivors": [], "total": total, "note": "mutants truncated by cap: " + "; ".join(truncated)}
+        return {"status": "inconclusive", "reason": "truncated", "survivors": [], "total": total, "note": "mutants truncated by cap: " + "; ".join(truncated)}
     return {"status": "pass", "survivors": [], "total": total, "note": ""}
 
 

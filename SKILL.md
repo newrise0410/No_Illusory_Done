@@ -45,7 +45,7 @@ PRODUCT: src, public          # the ONLY paths the implementer may change; anyth
 SETUP: npm ci
 max_iterations: 8        stall_iters: 3
 max_supersedes: 1        max_gates_per_r: 4        max_mutants_per_file: 0   # 0 = run all; a cap makes mutation inconclusive, never pass
-mutation_required: 1     # 1: inconclusive mutation → CI inconclusive; 0: accept (non-python projects) — decided at freeze time
+mutation_required: 1     # 0 waives ONLY "no python changed" (non-python projects); a capped or node-less python run is never waived
 EXPECTED_NEW: package.json, src/__init__.py   # product files the implementation will create that the influence guard would otherwise refuse
 ```
 
