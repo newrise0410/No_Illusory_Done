@@ -933,7 +933,15 @@ def ci_verdict(ctx: Ctx) -> tuple[str, list[str]]:
     fz = verify_freeze(ctx, gates, quiet=True)
     a_ok, results, unmet = stage_a(ctx, gates, record=False)
     judge = [g.id for g in gates if g.kind == "llm-judge"]
+    def repo_state():
+        return ({f: (sha_file(ctx.root / f) if (ctx.root / f).is_file() else None) for f in changed_files(ctx, "HEAD")}, nid_snapshot(ctx))
+    pre = repo_state()
     verdicts, problems = check_ci_pointers(ctx, highs, judge)
+    post = repo_state()
+    if pre != post:
+        diff = sorted(set(pre[0]) ^ set(post[0]) | {k for k in pre[0] if k in post[0] and pre[0][k] != post[0][k]})
+        problems.append(f"a pointer command changed files ({', '.join(diff[:10]) or 'checker files'}): pointer commands must be observational -> reject")
+        verdicts = {k: "fail" for k in verdicts}
     if flaky_ids(results): problems.append(f"flaky gates passed only on retry: {','.join(flaky_ids(results))} (process fail)")
     mut = mutation_verdict(ctx, gates)
     _, _, _, caps = parse_plan(ctx)
