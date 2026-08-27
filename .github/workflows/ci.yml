@@ -1,0 +1,41 @@
+name: checker
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+        python: ["3.11", "3.12"]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0          # the checker refuses shallow clones
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - name: Unit, refusal-rule, red-team and documentation tests
+        run: python3 -m unittest discover -s tests -v
+
+  dogfood:
+    # The repository verifies itself: frozen ledger, RED records, remote witness (origin = GitHub), Stage A re-run.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Freeze intact and witnessed by origin
+        run: python3 scripts/nid_check.py --verify-freeze
+      - name: Stage A on this checkout
+        run: python3 scripts/nid_check.py --run .no-illusory-done/LEDGER.md
+      - name: Machine report
+        run: python3 scripts/nid_check.py --report || true

@@ -108,6 +108,20 @@ H3: fail tier badge missing on /pricing
 
 `--red` proves an oracle fails without the code; `--mutate` proves it fails with *slightly wrong* code. For every python source file changed since the freeze, the checker generates AST mutants (comparison/arithmetic/boolean operator swaps, constant shifts, `if` negation, `return → return None`), applies each in a throwaway git worktree, and re-runs all gates. All mutants run (an optional `max_mutants_per_file` cap makes the result `inconclusive`, never `pass`). In `--ci`, an inconclusive mutation yields `CI: inconclusive`; `mutation_required: 0` in the frozen `PLAN.md` waives only the "no python changed" case, never a capped or node-less run. A mutant counts as killed only when a gate failed **with an assertion** (`AssertionError`, `FAILED`, `expected`, `not ok`…); a mutant that merely crashes the module is a survivor. A mutant no gate kills is printed as `VACUOUS ORACLE` and the command fails. Zero mutants (no changed python, or python with nothing to mutate) is `inconclusive` — exit 1, shown in `--report`, not silently a pass. v1 is python-only.
 
+### 3.10 Modes: lite (default) and strict
+
+Every guard above has a cost in false refusals. `PLAN.md` chooses, at freeze time:
+
+| | `strictness: lite` (default) | `strictness: strict` |
+|---|---|---|
+| Freeze, RED, `PRODUCT` scope, remote witness, product-execution ban, influence files, caps | on | on |
+| Shell-syntax bans in CHECK (`$`, `||`, `echo`, control flow, nested shells, heredocs) | **off** — only `exit 0`, `passWithNoTests`, redirection and file-mutating commands are refused | on |
+| Mutation required for `merge-ok` | off (`mutation_required: 0`) | on unless the plan waives it |
+
+Lite keeps everything that is cheap and structural; strict additionally closes the shell-syntax bypass classes (a `||` fallback, an `if/else` that swallows a failure, an `echo` that prints the marker). Use strict for CI-gated work; use lite when the shell rules keep refusing legitimate gates. What lite gives up is listed in the same table — it is a documented trade, not a silent one.
+
+Other frozen switches: `witness: local` skips the remote query (offline work; the witness is then local history only, and `--report` says so); `regression_only: 1` allows a ledger where every gate is `RED: pass-ok` (nothing proves *new* behaviour — for characterising existing code); `MUTATE: <cmd>` + `MUTATE_EXPECT: <marker>` delegates mutation to an external tool (Stryker, mutmut, cargo-mutants) — the command must exit 0 and print the marker last, so wrap the tool in a repo-owned script that checks the score; `max_supersedes` defaults to 3.
+
 ## 4. Roles
 
 | Role | Reads | Writes | May not |
@@ -188,7 +202,7 @@ max_ci_attempts: 3
   COVERS: R2
 
 - [ ] G3: diff introduces no token-shaped strings
-  CHECK: git diff main -- src | grep -Ev '^-' | grep -Eq '(sk|ghp|AKIA)[A-Za-z0-9_-]{16,}' && exit 1; cat tests/nid/G3.marker
+  CHECK: git diff main -- src | grep -Ev '^-' | grep -Eq '(sk|ghp|AKIA)\w{16,}' && exit 1; cat tests/nid/G3.marker
   EXPECT: NID G3
   FILES: tests/nid/G3.marker
   COVERS: R3
@@ -248,7 +262,7 @@ python3 scripts/nid_check.py --report                       # paste verbatim; "d
 | `--red LEDGER` | run all gates, require RED, write `FREEZE.sha256` (`--supersede "<reason>"` to re-freeze, recorded) | all required gates failed |
 | `--verify-freeze` | hashes vs working tree; FREEZE vs HEAD; commit count vs declared supersedes; RED records present | match |
 | `--run LEDGER` | freeze → run gates → freeze again; update `STATE.md`; enforce caps | ALL MET (exit 1 unmet, 3 handoff) |
-| `--mutate LEDGER` | AST mutants of changed python, each must be killed by a gate | no survivors (0 mutants = inconclusive, exit 1) |
+| `--mutate LEDGER` | AST mutants of changed python (or the plan's `MUTATE:` tool), each must be killed by an assertion | no survivors (0 mutants = inconclusive, exit 1) |
 | `--ci CI.md` | run `SETUP`, re-run Stage A + mutation; validate pointers against exact SUBJECT; count attempts | `CI: merge-ok` consistent |
 | `--report` | re-run Stage A + CI validation; print verdict | `VERDICT: merge-ok` |
 | `--hook` | Stop-hook entry (no ledger or no freeze yet → exit 0; else `--run`, exit 2 blocks) | ALL MET |
@@ -267,7 +281,11 @@ Gate fields: `CHECK` (run under `bash -o errexit -o pipefail -o nounset` in a cl
   CI.md              written only by the CI role, validated by --ci (which re-runs Stage A)
 ```
 
-## 6. What this does not solve
+## 6. Testing the checker
+
+`python3 -m unittest discover -s tests -v` — four layers against real git fixture repos: the happy path in both modes, one case per refusal rule, every bypass found in six adversarial review rounds (each must stay refused), and every `CHECK:` example in this README and SKILL.md run through the checker's own rules plus the bash `errexit` semantics they rely on. GitHub Actions runs it on Ubuntu and macOS, then **dogfoods**: this repository carries its own `.no-illusory-done/` ledger (regression-only, strict), and CI runs `--verify-freeze` and `--run` on every push.
+
+## 7. What this does not solve
 
 - **An agent that never loads the skill**, or deletes `.no-illusory-done/`. Git history shows it; nothing prevents it.
 - **Force-push.** With a remote configured, the freeze commit must be reachable from a ref the remote *actually* reports (`git ls-remote`, not local tracking refs), so a local history rewrite, a forged tracking ref, or an unpushed freeze is caught; a force-push to the remote is not. Branch protection or a human is the bound. With no remote at all, the witness is local history only and `--report` says so. Remotes are queried live (30 s timeout each); one reachable remote holding the freeze commit suffices, and if none is reachable the verdict fails closed — **verification needs network access to the remote**.
@@ -282,7 +300,7 @@ Gate fields: `CHECK` (run under `bash -o errexit -o pipefail -o nounset` in a cl
 - **A CHECK that deliberately daemonizes.** TIMEOUT kills the process group; a child that calls `setsid` and ignores SIGHUP survives. It lives in a frozen, repo-owned script, so it is reviewable, not preventable.
 - **Auth, payments, production merges.** Human review and host CI remain the right bound there.
 
-## 7. Lineage
+## 8. Lineage
 
 Unlazy-style gates, Ralph-style fresh-context retry loops, information-barrier TDD, epistemic ledgers (belief ≠ evidence), outcome graders, and the process/outcome split from universal-verifier work. The contribution here is only the mechanical part: putting each of those into a checker with a fail-closed exit code.
 

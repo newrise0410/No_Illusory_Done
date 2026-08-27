@@ -58,18 +58,25 @@ TOOLCHAIN_KEYS = ("VIRTUAL_ENV", "CARGO_HOME", "RUSTUP_HOME", "GOPATH", "GOROOT"
 CONSTANT_CMD = re.compile(r"^(git\s+(log|rev-parse|rev-list|describe|branch|remote|config|status|tag|show-ref|symbolic-ref)|date|whoami|pwd|uname|hostname|id|ls|wc|cat|head|tail|stat|md5|shasum|sha256sum|python[3]?\s+--version|node\s+-v)\b")
 R_RE = re.compile(r"^(R\d+):\s*(.+?)\s*$")
 H_RE = re.compile(r"^(H\d+):\s*(.+?)\s*$")
-CAP_RE = re.compile(r"^(max_iterations|stall_iters|max_ci_attempts|max_supersedes|max_gates_per_r|max_mutants_per_file|mutation_required):\s*(\d+)\s*$")
+CAP_RE = re.compile(r"^(max_iterations|stall_iters|max_ci_attempts|max_supersedes|max_gates_per_r|max_mutants_per_file|mutation_required|regression_only):\s*(\d+)\s*$")
+MODE_RE = re.compile(r"^(strictness|witness):\s*(\w+)\s*$")
 VAGUE = re.compile(r"looks good|covers the feature|works correctly|as expected|properly|correctly", re.I)
 # Tokens in a CHECK that look like paths.
 PATHISH = re.compile(r"(?<![\w-])((?:\.{0,2}/)?[\w.-]+(?:/[\w.-]+)*\.[A-Za-z0-9]{1,8}|(?:\./|\.\./)[\w./-]+)")
+# Always enforced: these observe nothing or soften failure regardless of mode.
+BAD_CHECK_ALWAYS = [
+    (re.compile(r"\bexit\s+0\b"), "exit 0"),
+    (re.compile(r"passWithNoTests|--no-verify"), "skip/soften flag"),
+    (re.compile(r"(^|\s)(touch|cp|mv|rm|tee|sed\s+-i)\s|>"), "mutating command or redirection in CHECK"),
+]
+# Enforced only under strictness: strict — closes the shell-syntax bypass classes at the cost of false refusals.
 BAD_CHECK = [
     (re.compile(r"(^|[;&|(]\s*)(echo|printf|true|false|command|eval|exec|source|env|xargs|nohup|nice|time|builtin)\b"), "shell no-op/indirection"),
     (re.compile(r"(^|[;&|(]\s*):(\s|$)"), ":"),
     (re.compile(r"\b(sh|bash|zsh|dash)\s+-c\b"), "nested shell"),
-    (re.compile(r"\bexit\s+0\b"), "exit 0"),
-    (re.compile(r"passWithNoTests|--no-verify|\|\|"), "skip/soften flag or '||' fallback (a gate must be conjunctive)"),
+    (re.compile(r"\|\|"), "'||' fallback (a gate must be conjunctive)"),
     (re.compile(r"python[3]?\s+-c\b"), "python -c"),
-    (re.compile(r"(^|\s)(touch|cp|mv|rm|tee|sed\s+-i)\s|[<>]"), "mutating command or redirection in CHECK"),
+    (re.compile(r"<"), "input redirection"),
     (re.compile(r"[$`]|<<|(^|[;&|(]\s*)\w+=\S"), "shell expansion/heredoc/assignment (use a repo-owned script)"),
     (re.compile(r"(^|[;&|(\s])(if|then|else|elif|fi|while|until|for|do|done|case|esac|function|select|!|\{|\}|\[\[|\[)(\s|$|;)"), "shell control flow (a gate is a straight && chain)"),
 ]
@@ -156,14 +163,27 @@ def parse_plan(ctx: Ctx):
         die("PLAN.md missing")
     sanity_text("PLAN.md", ctx.plan.read_text(encoding="utf-8"))
     reqs, highs, setup = {}, {}, []
-    caps = {"max_iterations": 8, "stall_iters": 3, "max_ci_attempts": 3, "max_supersedes": 1, "max_gates_per_r": 4, "max_mutants_per_file": 0, "mutation_required": 1}
+    caps = {"max_iterations": 8, "stall_iters": 3, "max_ci_attempts": 3, "max_supersedes": 3, "max_gates_per_r": 4,
+            "max_mutants_per_file": 0, "mutation_required": 0, "regression_only": 0,
+            "strictness": "lite", "witness": "remote", "mutate_cmd": "", "mutate_expect": ""}
     expected_new: list[str] = []
     product: list[str] = []
+    explicit: set[str] = set()
     for ln, raw in enumerate(ctx.plan.read_text(encoding="utf-8").replace("\r", "").splitlines(), 1):
         line = raw.strip().lstrip("-* ").strip()
         m = CAP_RE.match(line)
         if m:
-            caps[m.group(1)] = int(m.group(2)); continue
+            caps[m.group(1)] = int(m.group(2)); explicit.add(m.group(1)); continue
+        m = MODE_RE.match(line)
+        if m:
+            k, v = m.group(1), m.group(2)
+            if k == "strictness" and v not in ("lite", "strict"): die(f"PLAN.md strictness must be lite|strict (got {v})")
+            if k == "witness" and v not in ("remote", "local"): die(f"PLAN.md witness must be remote|local (got {v})")
+            caps[k] = v; continue
+        if line.startswith("MUTATE:"):
+            caps["mutate_cmd"] = line[7:].strip(); continue
+        if line.startswith("MUTATE_EXPECT:"):
+            caps["mutate_expect"] = line[14:].strip(); continue
         if line.startswith("SETUP:"):
             setup.append(line[6:].strip()); continue
         if line.startswith("PRODUCT:"):
@@ -223,6 +243,10 @@ def parse_plan(ctx: Ctx):
         die("PLAN.md has no R1.. requirement clauses")
     caps["_expected_new"] = expected_new
     caps["_product"] = product
+    if caps["strictness"] == "strict" and caps["mutation_required"] == 0 and not caps["mutate_cmd"] and "mutation_required" not in explicit:
+        caps["mutation_required"] = 1  # strict mode requires mutation unless explicitly waived
+    if bool(caps["mutate_cmd"]) != bool(caps["mutate_expect"]):
+        die("PLAN.md MUTATE: and MUTATE_EXPECT: must be given together")
     if not product:
         die("PLAN.md must declare PRODUCT: <paths the implementation may change> (frozen)")
     return reqs, highs, setup, caps
@@ -308,8 +332,10 @@ def parse_ledger(ctx: Ctx) -> list[Gate]:
             continue
         chk, exp = g.f.get("CHECK", "").strip(), g.f.get("EXPECT", "").strip()
         if not chk or not exp: die(f"{g.id}: missing CHECK or EXPECT")
-        for rx, name in BAD_CHECK:
-            if rx.search(chk): die(f"{g.id}: forbidden CHECK pattern ({name})")
+        caps_ = parse_plan(ctx)[3]
+        rules = BAD_CHECK_ALWAYS + (BAD_CHECK if caps_["strictness"] == "strict" else [])
+        for rx, name in rules:
+            if rx.search(chk): die(f"{g.id}: forbidden CHECK pattern ({name})" + ("" if caps_["strictness"] == "strict" else ""))
         lit = exp[1:-1] if is_regex(exp) else exp
         if lit and lit in chk: die(f"{g.id}: CHECK contains EXPECT text (self-fulfilling)")
         if is_regex(exp):
@@ -335,6 +361,7 @@ def parse_ledger(ctx: Ctx) -> list[Gate]:
         if t <= 0 or t > 3600: die(f"{g.id}: TIMEOUT must be 1..3600 seconds")
         cwd = ctx.root / g.f.get("CWD", ".")
         if not cwd.is_dir() or ctx.rel(cwd).startswith(".."): die(f"{g.id}: CWD not a dir inside repo")
+        if not g.files: die(f"{g.id}: FILES is empty — a runnable gate must depend on at least one frozen oracle file")
         # Every existing file the CHECK names must be frozen (FILES). A path that does not
         # exist yet is product output the implementation will create.
         declared = set(g.files)
@@ -387,7 +414,6 @@ def parse_ledger(ctx: Ctx) -> list[Gate]:
                 if under(relp, prod): continue  # product files may be read (never executed, checked above)
                 if relp not in declared and tok not in declared:
                     die(f"{g.id}: CHECK references existing file {relp} not in FILES (existing inputs must be frozen; delete it before --red if the implementation must regenerate it)")
-        if not g.files: die(f"{g.id}: FILES is empty — a runnable gate must depend on at least one frozen oracle file")
         for f in g.files:
             fp = ctx.root / f
             if not fp.is_file() or not inside_repo(ctx, fp): die(f"{g.id}: FILES entry missing, not a regular file, or symlinks outside the repo: {f}")
@@ -395,8 +421,8 @@ def parse_ledger(ctx: Ctx) -> list[Gate]:
     if len(checks) != len(set(checks)): die("two gates have identical CHECK commands (duplicate observation)")
     if all(g.kind == "llm-judge" for g in gates):
         die("all gates are llm-judge; at least one runnable gate required")
-    if not any(g.kind == "cmd" and g.f.get("RED", "required") == "required" for g in gates):
-        die("at least one gate must be RED: required (otherwise nothing proves new behavior)")
+    if not any(g.kind == "cmd" and g.f.get("RED", "required") == "required" for g in gates) and not parse_plan(ctx)[3]["regression_only"]:
+        die("at least one gate must be RED: required (otherwise nothing proves new behavior); set regression_only: 1 in PLAN.md for a regression-only ledger")
     reqs, highs, _, _ = parse_plan(ctx)
     covered = set()
     for g in gates:
@@ -620,7 +646,9 @@ def verify_freeze(ctx: Ctx, gates: list[Gate] | None = None, quiet=False) -> boo
             # Remote witness: a rewritten local history cannot forge a commit that a remote already holds.
             fcommit = git(ctx, "log", "-1", "--format=%H", "--", relf).stdout.strip()
             remotes = git(ctx, "remote").stdout.split()
-            if remotes:
+            if remotes and parse_plan(ctx)[3]["witness"] == "local":
+                if not quiet: print("FREEZE WARNING: witness: local — remote not queried; the freeze witness is local history only")
+            elif remotes:
                 witnessed, unreachable = [], []
                 for rname in remotes:
                     try:
@@ -1053,7 +1081,22 @@ def count_mutants(src: str) -> int:
 
 
 def mutation_verdict(ctx: Ctx, gates: list[Gate], verbose=False) -> dict:
-    """Returns {"status": pass|fail|inconclusive, "survivors": [...], "total": n, "note": str}."""
+    """Returns {"status": pass|fail|inconclusive, "survivors": [...], "total": n, "note": str}.
+    If PLAN declares MUTATE:/MUTATE_EXPECT:, that external tool (Stryker, mutmut, cargo-mutants…) is the verdict."""
+    caps = parse_plan(ctx)[3]
+    if caps["mutate_cmd"]:
+        cmd, exp = caps["mutate_cmd"], caps["mutate_expect"]
+        for rx, name in BAD_CHECK_ALWAYS + BAD_CHECK:
+            if rx.search(cmd): return {"status": "fail", "reason": "bad-cmd", "survivors": [f"MUTATE command forbidden ({name})"], "total": 0, "note": ""}
+        try:
+            r = subprocess.run(["bash", "-o", "errexit", "-o", "pipefail", "-c", cmd], cwd=str(ctx.root), timeout=3600,
+                               stdout=subprocess.PIPE, stderr=subprocess.STDOUT, env=clean_env())
+        except subprocess.TimeoutExpired:
+            return {"status": "fail", "reason": "timeout", "survivors": ["MUTATE timed out"], "total": 0, "note": ""}
+        out = r.stdout.decode("utf-8", "replace")
+        if verbose: print(out[-3000:])
+        ok = r.returncode == 0 and expect_match(exp, out)
+        return {"status": "pass" if ok else "fail", "reason": "external", "survivors": [] if ok else [f"MUTATE exit {r.returncode}, last line {(out.strip().splitlines() or [''])[-1]!r}"], "total": -1, "note": f"external: {cmd}"}
     frozen, _, _ = read_freeze(ctx)
     fcommit = git(ctx, "log", "-1", "--format=%H", "--", ctx.rel(ctx.freeze)).stdout.strip()
     changed = [f for f in changed_files(ctx, fcommit, include_ignored=True) if f.endswith(".py") and f not in frozen and not f.startswith("scripts/nid_check") and (ctx.root / f).is_file()]

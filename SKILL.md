@@ -42,9 +42,14 @@ R1: /pricing renders exactly three tier cards
 R2: annual toggle shows a 20.00% discount
 H1: tier order matches marketing spec | FALSIFIER: any order other than Basic, Pro, Team is visible | SUBJECT: src/pages/pricing.tsx, $ npx playwright test tiers
 PRODUCT: src, public          # the ONLY paths the implementer may change; anything else changed since the freeze is refused
+strictness: lite              # lite (default): structural guards only; strict: also shell-syntax bans + mutation required
+witness: remote               # local = skip the remote query (offline); witness is then local history only
+regression_only: 0            # 1 = every gate may be RED: pass-ok (characterising existing code; proves nothing new)
+MUTATE: npm run mutation:gate # optional external mutation tool; must exit 0 and print MUTATE_EXPECT last
+MUTATE_EXPECT: NID MUTATION OK
 SETUP: npm ci
 max_iterations: 8        stall_iters: 3
-max_supersedes: 1        max_gates_per_r: 4        max_mutants_per_file: 0   # 0 = run all; a cap makes mutation inconclusive, never pass
+max_supersedes: 3        max_gates_per_r: 4        max_mutants_per_file: 0   # 0 = run all; a cap makes mutation inconclusive, never pass
 mutation_required: 1     # 0 waives ONLY "no python changed" (non-python projects); a capped or node-less python run is never waived
 EXPECTED_NEW: package.json, src/__init__.py   # product files the implementation will create that the influence guard would otherwise refuse
 ```
@@ -67,7 +72,7 @@ EXPECTED_NEW: package.json, src/__init__.py   # product files the implementation
   KIND: cmd     RED: required                             # llm-judge → no CHECK; pass-ok → regression gate only
 ```
 
-Checker enforces: CHECK runs under `bash -o errexit -o pipefail -o nounset` (a `;`-masked failure fails); forbidden: `echo printf true false : command eval exec source env xargs nohup nice time sh -c exit 0 passWithNoTests || true python -c touch cp mv rm tee sed -i >` and any `$`, backtick, heredoc, `VAR=`, or shell control flow (`if/else/while/for/case/!/[`) — a gate is a straight `&&` chain (use a repo-owned script); CHECK may not contain EXPECT; **every existing non-PRODUCT file a CHECK names must be in FILES** (PRODUCT files may be read — `grep`, `diff` — but never passed to an interpreter; a path that does not exist yet is product output), FILES non-empty, all inside the repo, no symlinks out; EXPECT regexes that match `""`/`FAIL`/arbitrary text are refused; CHECK runs in a **clean environment** (PATH/HOME/LANG/TMPDIR only, `PYTHONNOUSERSITE=1`; `ENV:` may add literal values but never PATH/PYTHONPATH/NODE_PATH/LD_PRELOAD); `--run` refuses if a **runner-influencing file** (conftest.py, sitecustomize.py, *.pth, pytest.ini, pyproject.toml, package.json, jest/vitest/babel config, tsconfig, .env, Makefile, __init__.py…) was added or changed since the freeze without being frozen or declared in `EXPECTED_NEW:`; no two gates with identical CHECK; at most `max_gates_per_r` gates per R; `RED: pass-ok` only for gates whose FILES were committed at HEAD before the freeze and that pass at `--red`; at least one `RED: required` gate.
+Checker enforces: CHECK runs under `bash -o errexit -o pipefail -o nounset` (a `;`-masked failure fails); always forbidden: `exit 0`, `passWithNoTests`, redirection, file-mutating commands; **under `strictness: strict` also** forbidden: `echo printf true false : command eval exec source env xargs nohup nice time sh -c exit 0 passWithNoTests || true python -c touch cp mv rm tee sed -i >` and any `$`, backtick, heredoc, `VAR=`, or shell control flow (`if/else/while/for/case/!/[`) — a gate is a straight `&&` chain (use a repo-owned script); CHECK may not contain EXPECT; **every existing non-PRODUCT file a CHECK names must be in FILES** (PRODUCT files may be read — `grep`, `diff` — but never passed to an interpreter; a path that does not exist yet is product output), FILES non-empty, all inside the repo, no symlinks out; EXPECT regexes that match `""`/`FAIL`/arbitrary text are refused; CHECK runs in a **clean environment** (PATH/HOME/LANG/TMPDIR only, `PYTHONNOUSERSITE=1`; `ENV:` may add literal values but never PATH/PYTHONPATH/NODE_PATH/LD_PRELOAD); `--run` refuses if a **runner-influencing file** (conftest.py, sitecustomize.py, *.pth, pytest.ini, pyproject.toml, package.json, jest/vitest/babel config, tsconfig, .env, Makefile, __init__.py…) was added or changed since the freeze without being frozen or declared in `EXPECTED_NEW:`; no two gates with identical CHECK; at most `max_gates_per_r` gates per R; `RED: pass-ok` only for gates whose FILES were committed at HEAD before the freeze and that pass at `--red`; at least one `RED: required` gate.
 
 ## 4. Roles
 
