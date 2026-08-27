@@ -469,7 +469,9 @@ def kill_group(proc: subprocess.Popen) -> None:
         pass
 
 
-CRASH_KILL = re.compile(r"(ImportError|ModuleNotFoundError|SyntaxError|NameError|IndentationError|cannot import name|FileNotFoundError|No such file or directory)")
+# A mutant counts as killed only when a TEST ASSERTION failed. Any other failure (import error, IndexError, missing
+# file, crash) proves the module was loaded, not that its behaviour was tested. Whitelist, not blacklist.
+REAL_KILL = re.compile(r"(AssertionError|assert\b|FAILED|FAIL:|Failures?:|failures?=|expected|Expected|not ok|✗|✘|AssertionFailed|ExpectationFailed|mismatch)")
 
 
 def clean_env(g: Gate | None = None) -> dict:
@@ -1088,13 +1090,13 @@ def mutation_verdict(ctx: Ctx, gates: list[Gate], verbose=False) -> dict:
                     failed = [gid for gid, r in rs.items() if not r["pass"]]
                     # A kill counts only if some gate failed WITHOUT an import/syntax crash: a mutant that
                     # merely breaks importing proves the test imported the module, not that it tested it.
-                    real = [gid for gid in failed if not CRASH_KILL.search((sub.evidence / f"{gid}.out").read_text(errors="replace") if (sub.evidence / f"{gid}.out").exists() else "")]
+                    real = [gid for gid in failed if REAL_KILL.search((sub.evidence / f"{gid}.out").read_text(errors="replace") if (sub.evidence / f"{gid}.out").exists() else "")]
                     killed = bool(real)
                     crash_only = bool(failed) and not real
                 finally:
                     os.chdir(ctx.root)
                     git(ctx, "worktree", "remove", "--force", str(wt))
-            if verbose: print(f"{f} #{i} {m.desc}: {'killed' if killed else ('SURVIVED (crash-only: import/syntax error, not an assertion)' if crash_only else 'SURVIVED')}")
+            if verbose: print(f"{f} #{i} {m.desc}: {'killed' if killed else ('SURVIVED (crash-only: failed without an assertion)' if crash_only else 'SURVIVED')}")
             if not killed: survivors.append(f"{f}#{i} {m.desc}" + (" [crash-only]" if crash_only else ""))
     if total == 0:
         return {"status": "inconclusive", "reason": "no-mutable-nodes", "survivors": [], "total": 0, "note": "changed python has no mutable nodes"}
