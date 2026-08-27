@@ -1,6 +1,7 @@
 56bade4a7f9bf1e12fb5af0ce3a9249041ecf129cec5e7f09129066b3e0fc86f  .no-illusory-done/LEDGER.md
-f45dc893ff9406890ac3e09b120bab7f748dd564e96831481d4ba3a13c17aa60  .no-illusory-done/PLAN.md
+9c835865ba1a1564b6758ddc7b1b43b3464f3868457611b8a74cceb529b064fc  .no-illusory-done/PLAN.md
 b77ad9011b4df0071a97e0b5a8e3f8a399924fb416c1f8b0707f2deb0a5b8ae5  scripts/nid_check.py
 a2de7723749f736784fce22fe6980eee4bbb828644e4b2b8c4f923f22fbd5097  tests/nid/G1.marker
 076417d1d4cd03326f2dd2c44a711da36887dbe85b57005a21749264d04e2f57  tests/test_nid_check.py
-RED G1 5435f4d8f3a7e3c97393bd618346b0a85170b318521062aa76835f68e38f8718 0
+RED G1 22f9bf7059e70c9b4ce2634ef44c5b56d07dcefc0ce8251470f4918da71a236c 0
+SUPERSEDE 1 prev=b17abe0 README refreshed; PRODUCT widened to docs and CI config so documentation edits do not require re-freezing
