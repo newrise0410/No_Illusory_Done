@@ -8,4 +8,4 @@ regression_only: 1
 mutation_required: 0     # mutating a 1,200-line checker against a 50 s suite is hours of CI; waived explicitly, visibly
 max_iterations: 8
 stall_iters: 3
-max_supersedes: 3
+max_supersedes: 20      # the checker IS the product here: every checker change legitimately re-freezes

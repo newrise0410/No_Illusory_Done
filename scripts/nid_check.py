@@ -793,6 +793,27 @@ def nid_snapshot(ctx: Ctx) -> dict[str, str]:
     return out
 
 
+def marker_in_product(ctx: Ctx, gates: list[Gate]) -> None:
+    """A success marker is the oracle's word, never the product's. If any changed PRODUCT file contains a gate's
+    EXPECT literal, the gate can be satisfied by `cat`-ing the product (or by a masked fallback that does), which is
+    a sentinel — structural, so it holds in lite mode where shell-syntax bans are off."""
+    caps = parse_plan(ctx)[3]
+    fcommit = git(ctx, "log", "-1", "--format=%H", "--", ctx.rel(ctx.freeze)).stdout.strip()
+    literals = [(g.id, (g.f["EXPECT"].strip()[1:-1] if is_regex(g.f["EXPECT"].strip()) else g.f["EXPECT"].strip()))
+                for g in gates if g.kind == "cmd"]
+    for f in changed_files(ctx, fcommit, include_ignored=True):
+        if not under(f, caps["_product"]): continue
+        p = ctx.root / f
+        if not p.is_file() or p.stat().st_size > 4 * 1024 * 1024: continue
+        try:
+            text = p.read_text(encoding="utf-8")
+        except (UnicodeDecodeError, OSError):
+            continue
+        for gid, lit in literals:
+            if lit and lit in text:
+                die(f"{gid}: product file {f} contains the success marker {lit!r} — the marker must be printed by the frozen oracle, never stored in the product (sentinel)")
+
+
 def stage_a(ctx: Ctx, gates: list[Gate], record=True) -> tuple[bool, dict, list[str]]:
     """Freeze -> run -> freeze again. Returns (pass, results, unmet)."""
     if not verify_freeze(ctx, gates, quiet=True):
@@ -807,6 +828,7 @@ def stage_a(ctx: Ctx, gates: list[Gate], record=True) -> tuple[bool, dict, list[
     if before != after:
         changed = sorted(set(before) ^ set(after) | {k for k in before if k in after and before[k] != after[k]})
         die(f"a CHECK wrote into .no-illusory-done during the run ({', '.join(changed)}) -> product code may not touch checker files; reject")
+    marker_in_product(ctx, gates)
     unmet = [gid for gid, r in results.items() if not r["pass"]]
     return not unmet, results, unmet
 

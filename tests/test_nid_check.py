@@ -414,6 +414,104 @@ class RefusalRules(Base):
         self.assertRefused(fx.run(), "outside PRODUCT")
 
 
+class MoreRefusalPaths(Base):
+    """Negative tests for die() branches not covered above (round-7 coverage audit)."""
+
+    def test_plan_level(self):
+        cases = [
+            ("plan_missing", lambda fx: (fx.root / ".no-illusory-done/PLAN.md").unlink(), "PLAN.md missing"),
+            ("bad_witness", lambda fx: fx.w(".no-illusory-done/PLAN.md", PLAN + "witness: cloud\n"), "witness must be"),
+            ("dup_r", lambda fx: fx.w(".no-illusory-done/PLAN.md", PLAN + "R1: duplicate clause here\n"), "duplicate R1"),
+            ("dup_h", lambda fx: fx.w(".no-illusory-done/PLAN.md", PLAN + "H1: again | FALSIFIER: something else | SUBJECT: src/calc.py\n"), "duplicate H1"),
+            ("product_root", lambda fx: fx.w(".no-illusory-done/PLAN.md", PLAN.replace("PRODUCT: src", "PRODUCT: .")), "may not be the repo root"),
+            ("product_checker", lambda fx: fx.w(".no-illusory-done/PLAN.md", PLAN.replace("PRODUCT: src", "PRODUCT: .no-illusory-done")), "may not be the repo root"),
+            ("h_vague", lambda fx: fx.w(".no-illusory-done/PLAN.md", PLAN.replace("no credential-shaped strings in calc", "it works correctly")), "forbidden vague phrase"),
+            ("subject_outside", lambda fx: fx.w(".no-illusory-done/PLAN.md", PLAN.replace("SUBJECT: src/calc.py", "SUBJECT: /etc/hosts")), "must be an existing regular file"),
+            ("subject_nid", lambda fx: fx.w(".no-illusory-done/PLAN.md", PLAN.replace("SUBJECT: src/calc.py", "SUBJECT: .no-illusory-done/PLAN.md")), "may not be inside .no-illusory-done"),
+            ("subject_cmd_short", lambda fx: fx.w(".no-illusory-done/PLAN.md", PLAN.replace("$ git diff HEAD --stat", "$ ls")), "too short or forbidden"),
+            ("expected_new_exists_at_red", lambda fx: (fx.w(".no-illusory-done/PLAN.md", PLAN + "EXPECTED_NEW: package.json\n"), fx.w("package.json", "{}")), "already exists at freeze time"),
+        ]
+        for name, setup, needle in cases:
+            with self.subTest(rule=name):
+                fx = Fixture()
+                try:
+                    setup(fx)
+                    r = fx.red() if name == "expected_new_exists_at_red" else fx.status()
+                    self.assertRefused(r, needle, f"{name}: {out(r)}")
+                finally:
+                    fx.cleanup()
+
+    def test_ledger_level(self):
+        cases = [
+            ("ledger_empty", "", "ledger missing or empty"),
+            ("zero_gates", "# nothing here\n", "zero gates"),
+            ("dup_gate", LEDGER + LEDGER.replace("python3 tests/test_calc.py", "python3 tests/test_calc.py -v"), "duplicate gate id"),
+            ("dup_field", LEDGER + "  COVERS: R1\n", "duplicate field COVERS"),
+            ("dup_check", LEDGER + LEDGER.replace("G1:", "G2:"), "identical CHECK"),
+            ("bad_kind", LEDGER + "  KIND: human\n", "bad KIND"),
+            ("missing_check", LEDGER.replace("  CHECK: python3 tests/test_calc.py\n", ""), "missing CHECK or EXPECT"),
+            ("judge_with_check", LEDGER + "  KIND: llm-judge\n", "must not have CHECK/EXPECT"),
+            ("bad_red", LEDGER + "  RED: maybe\n", "bad RED value"),
+            ("regex_invalid", LEDGER.replace("EXPECT: NID G1", "EXPECT: /NID (G1/"), "EXPECT regex invalid"),
+            ("timeout_nonint", LEDGER + "  TIMEOUT: soon\n", "TIMEOUT must be an integer"),
+            ("bad_cwd", LEDGER + "  CWD: ../\n", "CWD not a dir inside repo"),
+            ("unparseable_check", LEDGER.replace("python3 tests/test_calc.py", "python3 'tests/test_calc.py"), "not parseable"),
+            ("files_missing", LEDGER.replace("FILES: tests/test_calc.py", "FILES: tests/test_calc.py, tests/nope.py"), "FILES entry missing"),
+            ("no_required_red", LEDGER + "  RED: pass-ok\n", "at least one gate must be RED: required"),
+            ("gates_per_r", "".join(LEDGER.replace("G1:", f"G{i}:").replace("CHECK: python3", f"CHECK: python3 -X opt{i}") for i in range(1, 7)), "traceability dilution"),
+        ]
+        for name, ledger, needle in cases:
+            with self.subTest(rule=name):
+                fx = Fixture(ledger=ledger)
+                try:
+                    r = fx.status()
+                    self.assertRefused(r, needle, f"{name}: {out(r)}")
+                finally:
+                    fx.cleanup()
+
+    def test_freeze_and_state_level(self):
+        fx = self.fixture()
+        fx.freeze()
+        fz = fx.root / ".no-illusory-done/FREEZE.sha256"
+        good = fz.read_text()
+        fz.write_text(good + "garbage line\n"); self.assertRefused(fx.nid("--verify-freeze"), "malformed")
+        fz.write_text(good + good.splitlines()[0] + "\n"); self.assertRefused(fx.nid("--verify-freeze"), "duplicate file")
+        fz.write_text("RED G1 " + "a" * 64 + " 1\n"); self.assertRefused(fx.nid("--verify-freeze"), "no file hashes")
+        fz.write_text(good)
+        fx.w(".no-illusory-done/STATE.md", "iteration: many\n"); self.assertRefused(fx.run(), "STATE.md malformed")
+        (fx.root / ".no-illusory-done/STATE.md").unlink()
+        fx.git("update-ref", "refs/nid/iteration", fx.git("hash-object", "-w", "--stdin", input="abc").stdout.strip() if False else fx.git("rev-parse", "HEAD").stdout.strip())
+        self.assertRefused(fx.run(), "refs/nid/iteration is malformed")
+
+    def test_pass_ok_requires_committed_files_and_green(self):
+        fx = self.fixture(ledger=LEDGER + "  RED: pass-ok\n", extra_plan="regression_only: 1\n")
+        self.assertRefused(fx.red(), "RED: pass-ok but the gate fails now")
+        fx.implement()
+        fx.w("tests/other.py", "x")  # uncommitted extra file is irrelevant; FILES itself is committed -> ok
+        self.assertOk(fx.red())
+
+    def test_ci_and_mutate_misc(self):
+        fx = self.fixture()
+        fx.freeze()
+        self.assertRefused(fx.nid("--mutate", ".no-illusory-done/LEDGER.md"), "baseline not ALL MET")
+        fx.implement(); fx.run()
+        self.assertRefused(fx.ci_md("H1: pass $ git diff HEAD --stat -- nothing-here sha=deadbeefdead"), "must equal")
+        self.assertRefused(fx.nid("--ci", ".no-illusory-done/OTHER.md"), "expects <repo>/.no-illusory-done/CI.md")
+        self.assertRefused(fx.nid("--run", ".no-illusory-done/LEDGER.md", cwd=fx.tmp), "must sit at the git toplevel")
+
+    def test_setup_failure_and_subject_symlink(self):
+        fx = self.fixture(extra_plan="SETUP: python3 -c 'import sys; sys.exit(3)'\n")
+        fx.freeze(); fx.implement(); fx.run()
+        self.assertRefused(fx.ci_md(), "SETUP failed")
+        fx2 = Fixture()
+        try:
+            os.symlink("/etc/hosts", fx2.root / "src/link.py")
+            fx2.w(".no-illusory-done/PLAN.md", PLAN.replace("SUBJECT: src/calc.py", "SUBJECT: src/link.py"))
+            self.assertRefused(fx2.status(), "must be an existing regular file")
+        finally:
+            fx2.cleanup()
+
+
 # ---------------------------------------------------------------------------
 # 3. Red team — every bypass found in adversarial rounds 1-6 must stay refused
 # ---------------------------------------------------------------------------
@@ -483,22 +581,29 @@ class RedTeam(Base):
         self.assertEqual(r.returncode, 1); self.assertIn("UNMET: G1", r.stdout)
 
     def test_repo_internal_path_entry_is_stripped(self):
+        """bin/ lives INSIDE PRODUCT so the scope guard is silent; only PATH sanitisation can stop the hijack."""
         fx = self._frozen()
-        (fx.root / "bin").mkdir(); fx.w("bin/python3", "#!/bin/sh\necho HIJACK\n"); os.chmod(fx.root / "bin/python3", 0o755)
-        r = fx.nid("--run", ".no-illusory-done/LEDGER.md", env={"PATH": f"{fx.root}/bin:./bin:{os.environ['PATH']}"})
-        self.assertIn("outside PRODUCT", out(r))  # bin/ itself is out of scope
-        shutil.rmtree(fx.root / "bin")
-        self.assertOk(fx.run(), "ALL MET")
+        (fx.root / "src/bin").mkdir(); fx.w("src/bin/python3", "#!/bin/sh\nprintf 'NID %s\\n' G1\n"); os.chmod(fx.root / "src/bin/python3", 0o755)
+        fx.w("src/calc.py", "# placeholder\n")  # no implementation: only the hijacked interpreter could make G1 pass
+        r = fx.nid("--run", ".no-illusory-done/LEDGER.md", env={"PATH": f"{fx.root}/src/bin:./src/bin:{os.environ['PATH']}"})
+        self.assertEqual(r.returncode, 1, out(r)); self.assertIn("UNMET: G1", r.stdout)
 
     def test_influence_files_after_freeze(self):
+        """Placed INSIDE PRODUCT so the scope guard is silent; only the influence-file guard can refuse."""
         for name in ("conftest.py", "sitecustomize.py", "hack.pth", "pytest.ini"):
             with self.subTest(file=name):
                 fx = Fixture(); fx.freeze(); fx.implement()
                 try:
-                    fx.w(name, "x\n")
-                    self.assertRefused(fx.run(), "outside PRODUCT")
+                    fx.w("src/" + name, "x\n")
+                    self.assertRefused(fx.run(), "runner-influencing files")
                 finally:
                     fx.cleanup()
+        fx = Fixture(); fx.freeze(); fx.implement()
+        try:
+            fx.w("conftest.py", "x\n")
+            self.assertRefused(fx.run(), "outside PRODUCT")
+        finally:
+            fx.cleanup()
 
     def test_influence_file_inside_product_needs_expected_new(self):
         fx = self._frozen()
@@ -579,6 +684,20 @@ class RedTeam(Base):
         fx.commit("big"); self.assertOk(fx.red()); fx.commit("freeze"); fx.push()
         r = fx.run(); self.assertIn("UNMET: G1", r.stdout)
         self.assertIn("OUTPUT TOO LARGE", (fx.root / ".no-illusory-done/evidence/G1.out").read_text())
+
+    def test_lite_masked_fallback_reading_product_marker(self):
+        """lite allows `||`; the structural guard is that no PRODUCT file may contain the marker."""
+        for c in ("python3 tests/test_calc.py || cat src/calc.py",
+                  "if python3 tests/test_calc.py; then cat src/calc.py; else cat src/calc.py; fi",
+                  "sh -c 'cat src/calc.py'"):
+            with self.subTest(check=c):
+                fx = Fixture(ledger=LEDGER.replace("python3 tests/test_calc.py", c))
+                try:
+                    fx.freeze()
+                    fx.w("src/calc.py", "NID G1\n")
+                    self.assertRefused(fx.run(), "contains the success marker")
+                finally:
+                    fx.cleanup()
 
     def test_nid_prefix_boundary(self):
         fx = self.fixture()
